@@ -64,11 +64,11 @@ fn build_upload_options(
         delete_from_host: preferences.delete_from_host,
         // Go field name (upload_options.go: DisableUnsupportedFilesFilter),
         // fed from Preferences.disable_unsupported_filter (CONTRACT.md).
-        disable_unsupported_files_filter: preferences.disable_unsupported_filter,
+        disable_unsupported_filter: preferences.disable_unsupported_filter,
         set_date_from_filename: preferences.set_date_from_filename,
         pair_live_photos: preferences.pair_live_photos,
         skip_incomplete_live_photos: preferences.skip_incomplete_live_photos,
-        update_existing_photos_to_live: preferences.update_existing_to_live,
+        update_existing_to_live: preferences.update_existing_to_live,
         ignore_apple_metadata: false,
         album_name: match album_mode {
             AlbumMode::Named => album_name.trim().to_string(),
