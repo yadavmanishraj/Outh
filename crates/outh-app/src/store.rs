@@ -32,7 +32,7 @@
 use std::sync::Arc;
 
 use outh_core::config::{Account, ConfigService, CredentialProtector, Preferences};
-use outh_core::{Error, Result};
+use outh_core::Result;
 
 use crate::protector::IdentityProtector;
 
@@ -43,24 +43,27 @@ use crate::protector::IdentityProtector;
 pub fn load() -> (Option<ConfigService>, Option<String>) {
     // TODO(DPAPI): swap IdentityProtector for the DPAPI protector here.
     let protector: Arc<dyn CredentialProtector> = Arc::new(IdentityProtector);
-    match ConfigService::load(protector) {
+    match ConfigService::load_default(protector) {
         Ok(service) => (Some(service), None),
         Err(error) => (None, Some(format!("Could not load config: {error}"))),
     }
 }
 
-pub fn add_account(service: &mut ConfigService, account: Account) -> Result<(), Error> {
-    service.add_account(account)
+pub fn add_account(service: &mut ConfigService, account: Account) -> Result<()> {
+    // Core upserts by the credential string (email + token-binding flag are
+    // derived from it inside the service).
+    service.upsert_credential(&account.credential)?;
+    Ok(())
 }
 
-pub fn remove_account(service: &mut ConfigService, email: &str) -> Result<(), Error> {
+pub fn remove_account(service: &mut ConfigService, email: &str) -> Result<()> {
     service.remove_account(email)
 }
 
-pub fn set_active(service: &mut ConfigService, email: &str) -> Result<(), Error> {
+pub fn set_active(service: &mut ConfigService, email: &str) -> Result<()> {
     service.set_active(email)
 }
 
-pub fn save_preferences(service: &mut ConfigService, preferences: &Preferences) -> Result<(), Error> {
+pub fn save_preferences(service: &mut ConfigService, preferences: &Preferences) -> Result<()> {
     service.set_preferences(preferences.clone())
 }

@@ -481,7 +481,7 @@ impl Component for OuthApp {
                 match Credential::parse(&raw) {
                     Ok(credential) => {
                         let account = Account {
-                            email: credential.email.clone(),
+                            email: credential.email().to_string(),
                             credential: raw,
                             needs_token_binding: credential.needs_token_binding(),
                         };

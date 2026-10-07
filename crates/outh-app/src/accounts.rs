@@ -31,11 +31,12 @@ pub fn connect_account(app: &mut OuthApp, context: &ComponentContext<OuthApp>) {
     }
     app.auth_busy = true;
     app.account_note = Some("Contacting Google…".to_string());
+    let proxy = app.prefs.proxy.clone();
     _ = context.spawn_background(move |_| {
-        let auth = outh_core::auth::EmbeddedSetupAuth::new();
+        let auth = outh_core::auth::EmbeddedSetupAuth::new(&proxy);
         match auth.exchange_oauth_token(&token) {
             Ok(credential) => Message::AccountConnected(Ok((
-                credential.email.clone(),
+                credential.email().to_string(),
                 credential.to_string(),
                 credential.needs_token_binding(),
             ))),
@@ -70,6 +71,7 @@ pub fn view(app: &OuthApp, context: &mut ViewContext<OuthApp>) -> View {
     for account in &app.accounts {
         let is_active = app.active_email.as_deref() == Some(account.email.as_str());
         let email = account.email.clone();
+        let email_for_set = email.clone();
         let set_sender = sender.clone();
         let remove_sender = sender.clone();
         let mut line = email.clone();
@@ -85,7 +87,7 @@ pub fn view(app: &OuthApp, context: &mut ViewContext<OuthApp>) -> View {
                     Button::new()
                         .is_enabled(!is_active)
                         .on_click(move || {
-                            _ = set_sender.send(Message::SetActiveAccount(email.clone()));
+                            _ = set_sender.send(Message::SetActiveAccount(email_for_set.clone()));
                         })
                         .content("Set active"),
                     Button::new()

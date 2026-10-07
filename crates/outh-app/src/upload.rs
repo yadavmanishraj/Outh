@@ -88,25 +88,18 @@ fn build_upload_options(
 /// ignored — all run outcomes reach the UI through the reporter.
 fn run_blocking(
     credential_string: String,
-    proxy: String,
-    saver: bool,
-    use_quota: bool,
     reporter: Arc<dyn UploadReporter>,
     inputs: Vec<PathBuf>,
     options: UploadOptions,
     cancel: outh_core::types::CancellationToken,
 ) -> String {
-    let factory = move || {
+    // The manager passes each run's ApiOptions (built from preferences by
+    // build_upload_options) to the factory; the factory only adds the
+    // run's credential.
+    let factory: outh_core::upload::PhotosFactory = Arc::new(move |api: &ApiOptions| {
         let credential = Credential::parse(&credential_string)?;
-        PhotosClient::new(
-            credential,
-            ApiOptions {
-                proxy: proxy.clone(),
-                saver,
-                use_quota,
-            },
-        )
-    };
+        PhotosClient::new(credential, api.clone())
+    });
     let manager = UploadManager::new(factory, reporter);
     let _summary = manager.run(inputs, options, cancel);
     "Upload finished.".to_string()
@@ -158,22 +151,10 @@ pub fn start_upload(app: &mut OuthApp, context: &ComponentContext<OuthApp>) {
     let completion = context.completion();
     let inputs = app.paths.clone();
     let options = build_upload_options(&app.prefs, app.album_mode, &app.album_name);
-    let proxy = app.prefs.proxy.clone();
-    let saver = app.prefs.saver;
-    let use_quota = app.prefs.use_quota;
     let credential_string = account.credential.clone();
 
     std::thread::spawn(move || {
-        let note = run_blocking(
-            credential_string,
-            proxy,
-            saver,
-            use_quota,
-            reporter,
-            inputs,
-            options,
-            cancel,
-        );
+        let note = run_blocking(credential_string, reporter, inputs, options, cancel);
         // Terminal signal, independent of the reporter's upload_stop: the
         // UI leaves the "running" state even if the run ended early.
         let _ = completion.complete(Message::UploadRunEnded(note));
