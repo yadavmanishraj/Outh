@@ -22,7 +22,6 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use outh_core::config::{Account, ConfigService, Preferences};
-use outh_core::credential::Credential;
 use outh_core::types::{AlbumStatus, FileResult, Outcome, PreflightWarning, ThreadStatus};
 use windows_pickers::{FolderPicker, OpenFilePicker};
 use windows_reactor::*;
@@ -175,6 +174,7 @@ impl PrefBool {
     }
 }
 
+#[derive(Clone)]
 pub enum Message {
     // Navigation (payload: the NavigationView item tag)
     NavigateTag(Option<String>),
