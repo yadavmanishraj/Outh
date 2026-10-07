@@ -21,6 +21,8 @@ pub fn view(app: &OuthApp, context: &mut ViewContext<OuthApp>) -> View {
     // (the settings_row carries the label and explanation).
     let toggle = |is_on: bool, field: PrefBool| -> View {
         ToggleSwitch::new()
+            .on_content("")
+            .off_content("")
             .is_on(is_on)
             .on_toggled(context.callback(move |value: bool| {
                 Message::PrefBoolChanged(field, value)
@@ -122,6 +124,8 @@ pub fn view(app: &OuthApp, context: &mut ViewContext<OuthApp>) -> View {
             // Presented positively: the switch is the inverse of core's
             // `disable_unsupported_filter` flag.
             ToggleSwitch::new()
+                .on_content("")
+                .off_content("")
                 .is_on(!prefs.disable_unsupported_filter)
                 .on_toggled(context.callback(|value: bool| {
                     Message::PrefBoolChanged(PrefBool::DisableUnsupportedFilter, !value)

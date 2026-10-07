@@ -119,7 +119,7 @@ pub fn card(children: Vec<View>) -> View {
         .border_thickness(Thickness::uniform(1.0))
         .corner_radius(CornerRadius::uniform(8.0))
         .padding(Thickness::uniform(SPACE_L))
-        .content(StackPanel::new().spacing(SPACE_S).children(children))
+        .content(StackPanel::new().spacing(SPACE_M).children(children))
         .into()
 }
 
