@@ -22,6 +22,7 @@ pub fn view(app: &OuthApp, context: &mut ViewContext<OuthApp>) -> View {
     let toggle = |name: &str, is_on: bool, field: PrefBool| -> View {
         ToggleSwitch::new()
                 .width(44.0)
+                .min_width(0.0)
             .on_content("")
             .off_content("")
             .automation_name(name)
@@ -100,6 +101,7 @@ pub fn view(app: &OuthApp, context: &mut ViewContext<OuthApp>) -> View {
             // Dependent on pairing (R-24): disabled while Pair is off.
             ToggleSwitch::new()
                 .width(44.0)
+                .min_width(0.0)
                 .on_content("")
                 .off_content("")
                 .automation_name("Skip incomplete Live Photos")
@@ -118,6 +120,7 @@ pub fn view(app: &OuthApp, context: &mut ViewContext<OuthApp>) -> View {
             // Dependent on pairing (R-24): disabled while Pair is off.
             ToggleSwitch::new()
                 .width(44.0)
+                .min_width(0.0)
                 .on_content("")
                 .off_content("")
                 .automation_name("Update existing photos to Live Photos")
@@ -147,6 +150,7 @@ pub fn view(app: &OuthApp, context: &mut ViewContext<OuthApp>) -> View {
             // `disable_unsupported_filter` flag.
             ToggleSwitch::new()
                 .width(44.0)
+                .min_width(0.0)
                 .on_content("")
                 .off_content("")
                 .automation_name("Include unsupported file types")
