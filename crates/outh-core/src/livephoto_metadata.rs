@@ -262,7 +262,7 @@ pub fn content_identifier_mov(path: &Path) -> Result<Option<MovInfo>> {
 /// The classifier-facing form: Go's `(LivePhotoMetadata, error)` pair, with
 /// the missing-identifier case carried in `MovInfo::content_identifier`.
 pub(crate) fn read_video_metadata(path: &Path) -> Result<MovInfo> {
-    let mut file = File::open(path)?;
+    let file = File::open(path)?;
     let size = file.metadata()?.len();
     let mut reader = ReaderAt { file };
     read_video_live_photo_metadata(&mut reader, size)
