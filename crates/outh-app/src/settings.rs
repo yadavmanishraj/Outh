@@ -21,6 +21,7 @@ pub fn view(app: &OuthApp, context: &mut ViewContext<OuthApp>) -> View {
     // (the settings_row carries the label and explanation).
     let toggle = |name: &str, is_on: bool, field: PrefBool| -> View {
         ToggleSwitch::new()
+                .width(44.0)
             .on_content("")
             .off_content("")
             .automation_name(name)
@@ -98,6 +99,7 @@ pub fn view(app: &OuthApp, context: &mut ViewContext<OuthApp>) -> View {
              video — is missing. Only applies while pairing is on.",
             // Dependent on pairing (R-24): disabled while Pair is off.
             ToggleSwitch::new()
+                .width(44.0)
                 .on_content("")
                 .off_content("")
                 .automation_name("Skip incomplete Live Photos")
@@ -115,6 +117,7 @@ pub fn view(app: &OuthApp, context: &mut ViewContext<OuthApp>) -> View {
              while pairing is on.",
             // Dependent on pairing (R-24): disabled while Pair is off.
             ToggleSwitch::new()
+                .width(44.0)
                 .on_content("")
                 .off_content("")
                 .automation_name("Update existing photos to Live Photos")
@@ -143,6 +146,7 @@ pub fn view(app: &OuthApp, context: &mut ViewContext<OuthApp>) -> View {
             // Presented positively: the switch is the inverse of core's
             // `disable_unsupported_filter` flag.
             ToggleSwitch::new()
+                .width(44.0)
                 .on_content("")
                 .off_content("")
                 .automation_name("Include unsupported file types")
