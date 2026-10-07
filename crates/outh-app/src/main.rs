@@ -837,7 +837,7 @@ impl Component for OuthApp {
         };
         let navigation = NavigationView::new()
             .is_back_button_visible(NavigationViewBackButtonVisible::Collapsed)
-            .pane_display_mode(NavigationViewPaneDisplayMode::Auto)
+            .pane_display_mode(NavigationViewPaneDisplayMode::Left)
             .is_settings_visible(false)
             .on_selected_tag_changed(context.callback(|tag: Option<Rc<str>>| {
                 Message::NavigateTag(tag.map(|tag| tag.to_string()))
