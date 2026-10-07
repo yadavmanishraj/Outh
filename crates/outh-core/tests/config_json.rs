@@ -74,6 +74,7 @@ fn sample_config() -> Config {
             set_date_from_filename: true,
             exclude_pattern: "*.tmp".to_string(),
             upload_threads: 7,
+            theme: String::new(),
             album_name: String::new(),
             album_auto_mode: false,
         },
