@@ -243,10 +243,7 @@ pub fn view(app: &OuthApp, context: &mut ViewContext<OuthApp>) -> View {
 /// add row, the designed drop zone, and one card per queued path.
 fn queue_section(app: &OuthApp, context: &mut ViewContext<OuthApp>) -> View {
     let mut children: Vec<View> = Vec::new();
-    children.push(theme::strong(format!("Queue ({})", app.paths.len())));
-    // The add row comes FIRST in construction order (= tab order, R-15)
-    // and stays visible above a long queue; the rows follow it.
-    children.push(add_row(app, context));
+    children.push(queue_header(app, context));
     if !app.running {
         // The designed drop target: hero size for the empty queue, a
         // compact strip once files are queued. It is the ONLY drop
@@ -261,6 +258,40 @@ fn queue_section(app: &OuthApp, context: &mut ViewContext<OuthApp>) -> View {
     StackPanel::new()
         .spacing(theme::SPACE_M)
         .children(children)
+        .into()
+}
+
+/// Queue header: the strong count on the left and the Clear action
+/// on the right (Clear lived in the old add-by-path row; the confirm
+/// dialog flow behind `ClearPaths` is unchanged).
+fn queue_header(app: &OuthApp, context: &mut ViewContext<OuthApp>) -> View {
+    Grid::new()
+        .columns([GridLength::STAR, GridLength::Auto])
+        .children(vec![
+            theme::strong(format!("Queue ({})", app.paths.len())),
+            Button::new()
+                .grid_column(1)
+                .style(ButtonStyle::Subtle)
+                .is_enabled(!app.running && !app.paths.is_empty())
+                .on_click(context.callback(|()| Message::ClearPaths))
+                .content("Clear")
+                .into(),
+        ])
+        .into()
+}
+
+/// The folder-picker affordance inside the drop zone: one click
+/// surface can't offer both native dialogs (the Windows file picker
+/// cannot select folders), so files ride the zone click and folders
+/// keep this explicit link.
+fn folder_link(context: &mut ViewContext<OuthApp>) -> View {
+    Border::new()
+        .horizontal_alignment(HorizontalAlignment::Center)
+        .content(
+            HyperlinkButton::new()
+                .content("Select a folder instead")
+                .on_click(context.callback(|()| Message::AddFolders)),
+        )
         .into()
 }
 
@@ -311,12 +342,13 @@ fn drop_zone(app: &OuthApp, context: &mut ViewContext<OuthApp>, hero: bool) -> V
         ];
         stack.push(
             TextBlock::new()
-                .text("Nothing uploads until you press Start upload.")
+                .text("Click to select files, or drop them here — nothing uploads until you press Start upload.")
                 .font_size(theme::TYPE_CAPTION)
                 .opacity(theme::DIM_SECONDARY)
                 .horizontal_alignment(HorizontalAlignment::Center)
                 .into(),
         );
+        stack.push(folder_link(context));
         StackPanel::new()
             .spacing(theme::SPACE_S)
             .children(stack)
@@ -326,11 +358,11 @@ fn drop_zone(app: &OuthApp, context: &mut ViewContext<OuthApp>, hero: bool) -> V
             .orientation(Orientation::Horizontal)
             .spacing(theme::SPACE_M)
             .horizontal_alignment(HorizontalAlignment::Center)
-            .children(vec![glyph, label])
+            .children(vec![glyph, label, folder_link(context)])
             .into()
     };
     Border::new()
-        .background(if hovering {
+        .background(if hovering || app.zone_hover {
             Brush::from(ThemeBrush::CardBackground)
         } else {
             Brush::from(Color::transparent())
@@ -356,6 +388,19 @@ fn drop_zone(app: &OuthApp, context: &mut ViewContext<OuthApp>, hero: bool) -> V
         .on_drag_enter(context.callback(|_kind: DragKind| Message::DragHover(true)))
         .on_drag_over(context.callback(|_kind: DragKind| Message::DragHover(true)))
         .on_drag_leave(context.message(Message::DragHover(false)))
+        .on_pointer_entered(
+            context.callback(|_info: PointerEventInfo| Message::ZoneHover(true)),
+        )
+        .on_pointer_exited(
+            context.callback(|_info: PointerEventInfo| Message::ZoneHover(false)),
+        )
+        // The zone is also the click target (the add-by-path row is
+        // gone): a plain click opens the files picker. Releases that
+        // complete on the inner folder link are handled by the button
+        // itself and do not reach this handler.
+        .on_pointer_released(
+            context.callback(|_info: PointerEventInfo| Message::AddFiles),
+        )
         .on_drop(context.callback(|data: DroppedData| match data {
             DroppedData::StorageItems(items) => Message::FilesDropped(
                 items
@@ -418,75 +463,6 @@ fn queue_row(
 /// buttons can never be clipped (I-02) — the star shrinks first.
 /// Enter in the box adds the path (I-05): TextBox has no key events in
 /// this stack, so a wrapping Border routes preview key-down, the
-/// pattern AUDIT_3 verified.
-fn add_row(app: &OuthApp, context: &mut ViewContext<OuthApp>) -> View {
-    let key_sender = context.sender();
-    let enter_to_add = RoutedCallback::new(move |info: KeyEventInfo| {
-        if info.key == VirtualKey::ENTER {
-            let _ = key_sender.send(Message::AddPathDraft);
-            true
-        } else {
-            false
-        }
-    });
-    let text_cell = Border::new()
-        .grid_column(0)
-        .on_preview_key_down(enter_to_add)
-        .content(
-            TextBox::new(app.path_draft.clone())
-                .header("Add by path")
-                .placeholder_text("Paste a file or folder path, then Add")
-                .is_enabled(!app.running)
-                .on_text_changed(context.callback(|value: std::rc::Rc<str>| {
-                    Message::PathDraftChanged(value.to_string())
-                })),
-        );
-    Grid::new()
-        .columns([
-            GridLength::STAR,
-            GridLength::Auto,
-            GridLength::Auto,
-            GridLength::Auto,
-            GridLength::Auto,
-        ])
-        .column_spacing(theme::SPACE_S)
-        .children(vec![
-            text_cell.into(),
-            Button::new()
-                .grid_column(1)
-                .vertical_alignment(VerticalAlignment::Bottom)
-                .is_enabled(!app.running)
-                .on_click(context.callback(|()| Message::AddPathDraft))
-                .content("Add")
-                .into(),
-            Button::new()
-                .grid_column(2)
-                .vertical_alignment(VerticalAlignment::Bottom)
-                .is_enabled(!app.running)
-                .on_click(context.callback(|()| Message::AddFiles))
-                .content("Add files…")
-                .into(),
-            Button::new()
-                .grid_column(3)
-                .vertical_alignment(VerticalAlignment::Bottom)
-                .is_enabled(!app.running)
-                .on_click(context.callback(|()| Message::AddFolders))
-                .content("Add folder…")
-                .into(),
-            Button::new()
-                .grid_column(4)
-                .vertical_alignment(VerticalAlignment::Bottom)
-                .style(ButtonStyle::Subtle)
-                .is_enabled(!app.running && !app.paths.is_empty())
-                // ClearPaths routes to the global confirmation dialog
-                // in main.rs (spec §2) — same as RequestClearQueue.
-                .on_click(context.callback(|()| Message::ClearPaths))
-                .content("Clear")
-                .into(),
-        ])
-        .into()
-}
-
 /// Album choice (spec §4.4). `RadioButtons` has no `is_enabled` in
 /// this stack (schema gap), so while a run is active the area renders
 /// as a static summary line instead of live radios that would silently

@@ -188,13 +188,12 @@ pub enum Message {
     ConfirmResolved(bool),
 
     // Upload section
-    PathDraftChanged(String),
-    AddPathDraft,
     AddFiles,
     AddFolders,
     PathsPicked(Vec<PathBuf>),
     FilesDropped(Vec<PathBuf>),
     DragHover(bool),
+    ZoneHover(bool),
     PickerFailed(String),
     RemovePath(usize),
     ClearPaths,
@@ -270,9 +269,10 @@ pub struct OuthApp {
 
     // Upload section state
     pub paths: Vec<PathBuf>,
-    pub path_draft: String,
     /// True while a file drag hovers the drop zone (upload.rs).
     pub drag_hover: bool,
+    /// True while the pointer hovers the drop zone (upload.rs).
+    pub zone_hover: bool,
     pub album_mode: AlbumMode,
     pub album_name: String,
     pub running: bool,
@@ -407,9 +407,9 @@ impl Component for OuthApp {
             active_email: None,
             prefs: Preferences::default(),
             paths: Vec::new(),
-            path_draft: String::new(),
             album_mode: AlbumMode::None,
             drag_hover: false,
+            zone_hover: false,
             album_name: String::new(),
             running: false,
             cancel_requested: false,
@@ -481,6 +481,7 @@ impl Component for OuthApp {
                 }
             }
             Message::DragHover(hovering) => self.drag_hover = hovering,
+            Message::ZoneHover(hovering) => self.zone_hover = hovering,
             Message::FilesDropped(paths) => {
                 self.drag_hover = false;
                 // Dropped paths merge exactly like picker results.
@@ -560,41 +561,6 @@ impl Component for OuthApp {
             }
 
             // ---- Upload section ----
-            Message::PathDraftChanged(value) => self.path_draft = value,
-            Message::AddPathDraft => {
-                // Validate at add time (FINAL_REVIEW R-12): a pasted
-                // path that doesn't exist is a typo to correct now, not
-                // a failed upload later; multi-line pastes split into
-                // separate entries.
-                let draft = self.path_draft.clone();
-                let mut notes: Vec<Note> = Vec::new();
-                let mut added = 0usize;
-                for line in draft.lines() {
-                    let line = line.trim().trim_matches('"');
-                    if line.is_empty() {
-                        continue;
-                    }
-                    let path = PathBuf::from(line);
-                    if !path.exists() {
-                        notes.push(Note::warning(format!(
-                            "That path doesn't exist: {line}"
-                        )));
-                    } else if self.paths.contains(&path) {
-                        notes.push(Note::info(format!("Already in the queue: {line}")));
-                    } else {
-                        self.paths.push(path);
-                        added += 1;
-                    }
-                }
-                if added > 0 {
-                    self.path_draft.clear();
-                }
-                if let Some(note) = notes.into_iter().next() {
-                    self.upload_note = Some(note);
-                } else if added > 0 {
-                    self.upload_note = None;
-                }
-            }
             Message::AddFiles => {
                 let accepted = OpenFilePicker::new()
                     .title("Choose files to upload")
