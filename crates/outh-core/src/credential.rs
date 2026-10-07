@@ -49,10 +49,26 @@ pub const REQUIRED_IMPORT_FIELDS: [&str; 7] = [
 /// A parsed Android credential string. Field order is preserved from
 /// parsing; serialization is canonical (Go `url.Values.Encode()` sorts by
 /// key), so `Credential::parse(s)?.to_string()` is a stable normal form.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct Credential {
     pairs: Vec<(String, String)>,
 }
+
+/// Go's `url.Values` is a map: two credentials are equal when they carry
+/// the same key/value pairs, regardless of pair order. (Serialization is
+/// canonical-sorted, so a parsed round-trip yields sorted pairs while
+/// `build_photos` yields template order — order must not affect equality.)
+impl PartialEq for Credential {
+    fn eq(&self, other: &Self) -> bool {
+        let mut a: Vec<&(String, String)> = self.pairs.iter().collect();
+        let mut b: Vec<&(String, String)> = other.pairs.iter().collect();
+        a.sort();
+        b.sort();
+        a == b
+    }
+}
+
+impl Eq for Credential {}
 
 impl Credential {
     /// Port of `url.ParseQuery`: pairs split on `&`, key/value split on the

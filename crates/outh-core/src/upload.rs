@@ -1443,8 +1443,14 @@ mod tests {
 
     impl Tree {
         fn build() -> Tree {
+            // Unique per call: tests run in parallel threads of one process,
+            // so a pid-only name makes concurrent Tree::build() calls wipe
+            // each other's fixtures mid-test.
+            static COUNTER: std::sync::atomic::AtomicU64 =
+                std::sync::atomic::AtomicU64::new(0);
+            let seq = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let root = std::env::temp_dir().join(format!(
-                "outh-upload-test-{}",
+                "outh-upload-test-{}-{seq}",
                 std::process::id()
             ));
             let _ = fs::remove_dir_all(&root);
