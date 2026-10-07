@@ -1313,7 +1313,12 @@ fn scan_directory(
     Ok(files)
 }
 
-/// Google Photos supported extensions (upload.go supportedFormats).
+/// Google Photos supported extensions (upload.go supportedFormats),
+/// minus one deliberate deviation: Go lists `ico`, but a live upload
+/// on 2026-10-07 proved Google Photos never accepts ICO — the bytes
+/// upload, then the commit returns no media key. Filtering it here
+/// reports the file as skipped-unsupported instead of a commit
+/// failure.
 fn is_supported(path: &Path) -> bool {
     let name = match path.file_name().and_then(|n| n.to_str()) {
         Some(n) => n,
@@ -1330,7 +1335,7 @@ fn is_supported(path: &Path) -> bool {
     matches!(
         ext.as_str(),
         // Photo formats
-        "avif" | "bmp" | "gif" | "heic" | "heif" | "ico" | "jpg" | "jpeg" | "png" | "tif"
+        "avif" | "bmp" | "gif" | "heic" | "heif" | "jpg" | "jpeg" | "png" | "tif"
             | "tiff" | "webp" | "cr2" | "cr3" | "nef" | "arw" | "orf" | "raf" | "rw2" | "pef"
             | "sr2" | "dng"
             // Video formats

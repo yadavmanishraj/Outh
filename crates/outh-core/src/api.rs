@@ -948,11 +948,16 @@ fn wrap_bearer_err(e: Error) -> Error {
 }
 
 /// Decode only the verified media-key path — port of Go's
-/// parseCreateMediaItemsResponse (core/api.go). Any 2xx body that does
-/// not yield a media key becomes `Error::CommitAmbiguous`: the media may
-/// exist server-side and the commit must never be retried (Go returns a
-/// plain non-retryable error for both the unmarshal failure and the
-/// empty-key case; CONTRACT.md names the variant).
+/// parseCreateMediaItemsResponse (core/api.go), with the two failure
+/// shapes kept distinct (Go returns a plain non-retryable error for
+/// both; the call site never retries either way):
+/// - a body that does not DECODE is `Error::CommitAmbiguous` — the
+///   commit may have landed server-side, so it must never be
+///   re-attempted (CONTRACT.md names the variant for this case);
+/// - a body that decodes cleanly but carries no media key is a
+///   definitive rejection — Google created nothing (live evidence
+///   2026-10-07: an .ico upload commits to exactly this) — reported
+///   as a plain failure, not an ambiguity.
 fn parse_create_media_items_response(body: &[u8]) -> Result<String> {
     let decoded = CreateMediaItemsResponse::decode(body).map_err(|e| {
         Error::CommitAmbiguous(format!("failed to parse accepted response: {e}"))
@@ -964,8 +969,10 @@ fn parse_create_media_items_response(body: &[u8]) -> Result<String> {
             }
         }
     }
-    Err(Error::CommitAmbiguous(
-        "upload rejected by API: media key is empty or missing".to_string(),
+    Err(Error::Other(
+        "upload rejected by API: no media key in the commit response \
+         (the file was not added — its format or content is not accepted)"
+            .to_string(),
     ))
 }
 
@@ -1207,6 +1214,22 @@ fn parsed_get<'a>(parsed: &'a [(String, String)], key: &str) -> &'a str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn commit_response_no_key_is_rejection_not_ambiguous() {
+        // One well-formed item with no result (tag 0x0A, len 0): the
+        // body decodes, so this is Google definitively creating
+        // nothing — a plain rejection, NOT CommitAmbiguous.
+        let err = parse_create_media_items_response(&[0x0A, 0x00]).unwrap_err();
+        assert!(
+            matches!(err, Error::Other(ref m) if m.contains("upload rejected by API")),
+            "got {err:?}"
+        );
+        // Undecodable bytes keep the ambiguous classification: the
+        // commit may have landed and must never be re-attempted.
+        let err = parse_create_media_items_response(&[0xFF, 0xFF, 0xFF]).unwrap_err();
+        assert!(matches!(err, Error::CommitAmbiguous(_)), "got {err:?}");
+    }
 
     #[test]
     fn profile_default() {
