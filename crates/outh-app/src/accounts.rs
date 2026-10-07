@@ -359,3 +359,34 @@ pub fn view(app: &OuthApp, context: &mut ViewContext<OuthApp>) -> View {
         )
         .into()
 }
+
+/// Handles Message::ImportRawCredential: validated import through core's
+/// `ConfigService::add_credentials` (required-field validation + duplicate
+/// rejection), gated by `Credential::looks_like` so a wrong paste (e.g. a
+/// bare oauth_token) is rejected with guidance instead of a core error.
+pub fn import_raw_credential(app: &mut OuthApp) {
+    let raw = app.raw_credential.trim().to_string();
+    if !outh_core::credential::Credential::looks_like(&raw) {
+        app.account_note = Some(Note::warning(
+            "That doesn't look like a credential string — nothing was imported.",
+        ));
+        return;
+    }
+    match &mut app.store {
+        Some(service) => match crate::store::add_credentials(service, &raw) {
+            Ok(email) => {
+                app.raw_credential.clear();
+                app.refresh_from_store();
+                app.account_note = Some(Note::success(format!("Imported account {email}.")));
+            }
+            Err(error) => {
+                app.account_note = Some(Note::error(error.to_string()));
+            }
+        },
+        None => {
+            app.account_note = Some(Note::error(
+                "Config could not be loaded, so the credential was not imported.",
+            ));
+        }
+    }
+}

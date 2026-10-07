@@ -695,34 +695,26 @@ impl Component for OuthApp {
             Message::AccountConnected(Ok((email, credential, needs_token_binding))) => {
                 self.auth_busy = false;
                 self.oauth_token.clear();
+                let connected_email = email.clone();
                 self.add_account(Account {
                     email,
                     credential,
                     needs_token_binding,
                 });
+                // Spec §5.2 success copy (add_account's generic note is
+                // overridden for the connect flow).
+                self.account_note = Some(Note::success(format!(
+                    "Connected and made active: {connected_email}"
+                )));
             }
             Message::AccountConnected(Err(error)) => {
                 self.auth_busy = false;
-                self.account_note = Some(Note::error(format!("Sign-in failed: {error}")));
+                // `error` is already user-ready copy (mapped in
+                // accounts::connect_account) — show it verbatim.
+                self.account_note = Some(Note::error(error));
             }
             Message::ImportRawCredential => {
-                let raw = self.raw_credential.trim().to_string();
-                match Credential::parse(&raw) {
-                    Ok(credential) => {
-                        let account = Account {
-                            email: credential.email().to_string(),
-                            credential: raw,
-                            needs_token_binding: credential.needs_token_binding(),
-                        };
-                        self.raw_credential.clear();
-                        self.add_account(account);
-                    }
-                    Err(error) => {
-                        self.account_note = Some(Note::error(format!(
-                            "That does not look like a credential: {error}"
-                        )));
-                    }
-                }
+                accounts::import_raw_credential(self);
             }
             Message::SetActiveAccount(email) => match &mut self.store {
                 Some(service) => match store::set_active(service, &email) {
