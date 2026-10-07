@@ -45,19 +45,25 @@ pub fn view(app: &OuthApp, context: &mut ViewContext<OuthApp>) -> View {
 
     // ---- Appearance ----
     children.push(theme::section_title("Appearance"));
-    children.push(theme::card(vec![
-        RadioButtons::new()
-            .items_source(["System", "Light", "Dark"])
-            .selected_index(Some(match prefs.theme.as_str() {
-                "light" => 1,
-                "dark" => 2,
-                _ => 0,
+    // Individual RadioButtons, not a RadioButtons group: the group's
+    // selection-index round-trip lost the click on the first item
+    // (verified on the laptop — choosing System never persisted), while
+    // per-button Checked events are deterministic.
+    let theme_radio = |label: &str, value: &'static str, checked: bool| -> View {
+        RadioButton::new()
+            .group_name("outh-theme")
+            .content(label)
+            .is_checked(Some(checked))
+            .on_checked(context.callback(move |_checked: Option<bool>| {
+                Message::ThemeChosen(value)
             }))
-            .on_selection_changed(
-                context.callback(|index: Option<usize>| Message::ThemeChanged(index)),
-            )
-            .header("Theme")
-            .into(),
+            .into()
+    };
+    children.push(theme::card(vec![
+        theme::strong("Theme"),
+        theme_radio("System", "system", prefs.theme != "light" && prefs.theme != "dark"),
+        theme_radio("Light", "light", prefs.theme == "light"),
+        theme_radio("Dark", "dark", prefs.theme == "dark"),
         theme::caption("System follows your Windows setting."),
     ]));
 

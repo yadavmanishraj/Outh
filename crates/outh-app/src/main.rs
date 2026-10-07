@@ -230,7 +230,7 @@ pub enum Message {
 
     // Settings section
     PrefBoolChanged(PrefBool, bool),
-    ThemeChanged(Option<usize>),
+    ThemeChosen(&'static str),
     PrefThreadsChanged(Option<f64>),
     PrefProxyChanged(String),
     PrefExcludePatternChanged(String),
@@ -808,13 +808,8 @@ impl Component for OuthApp {
             }
 
             // ---- Settings section ----
-            Message::ThemeChanged(index) => {
-                self.prefs.theme = match index {
-                    Some(1) => "light",
-                    Some(2) => "dark",
-                    _ => "system",
-                }
-                .to_string();
+            Message::ThemeChosen(theme) => {
+                self.prefs.theme = theme.to_string();
                 self.persist_preferences();
             }
             Message::PrefBoolChanged(field, value) => {
