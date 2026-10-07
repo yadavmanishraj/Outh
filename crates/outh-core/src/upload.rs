@@ -35,10 +35,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::api::{FileMeta, PhotosClient, ScottyToken};
 use crate::config::{ApiOptions, Preferences};
 use crate::create_media_items::{
-    live_photo_commit_policy, LivePhotoCreateRequest, LivePhotoReconcileRequest,
+    LivePhotoCreateRequest, LivePhotoReconcileRequest, MediaTimestamp,
 };
 use crate::filename::parse_timestamp_from_filename;
-use crate::livephoto::{LivePhotoClassificationOptions, LivePhotoPair, UploadWorkItem, UploadWorkKind};
+use crate::livephoto::{classify_with_options, ClassifyOptions, WorkItem};
 use crate::sha1calc::compute_sha1;
 use crate::types::{
     AlbumStatus, CancellationToken, FileResult, Outcome, PreflightWarning, Stage, ThreadStatus,
@@ -70,11 +70,11 @@ pub struct UploadOptions {
     pub threads: u32,
     pub force_upload: bool,
     pub delete_from_host: bool,
-    pub disable_unsupported_files_filter: bool,
+    pub disable_unsupported_filter: bool,
     pub set_date_from_filename: bool,
     pub pair_live_photos: bool,
     pub skip_incomplete_live_photos: bool,
-    pub update_existing_photos_to_live: bool,
+    pub update_existing_to_live: bool,
     /// Match Live Photo pairs by filename stem instead of Apple content
     /// identifiers. Never persisted (Go `IgnoreAppleMetadata`).
     pub ignore_apple_metadata: bool,
@@ -101,11 +101,11 @@ impl UploadOptions {
             threads: prefs.upload_threads,
             force_upload: prefs.force_upload,
             delete_from_host: prefs.delete_from_host,
-            disable_unsupported_files_filter: prefs.disable_unsupported_filter,
+            disable_unsupported_filter: prefs.disable_unsupported_filter,
             set_date_from_filename: prefs.set_date_from_filename,
             pair_live_photos: prefs.pair_live_photos,
             skip_incomplete_live_photos: prefs.skip_incomplete_live_photos,
-            update_existing_photos_to_live: prefs.update_existing_photos_to_live,
+            update_existing_to_live: prefs.update_existing_to_live,
             ignore_apple_metadata: false,
             album_name: prefs.album_name.clone(),
             album_auto_mode: prefs.album_auto_mode,
@@ -225,12 +225,17 @@ impl UploadManager {
         };
 
         // ---- Live Photo classification (livephoto.go ClassifyUploadWork). ----
-        let class_opts = LivePhotoClassificationOptions {
-            enabled: opts.pair_live_photos,
+        let class_opts = ClassifyOptions {
+            pair_live_photos: opts.pair_live_photos,
             skip_incomplete: opts.skip_incomplete_live_photos,
             ignore_apple_metadata: opts.ignore_apple_metadata,
         };
-        let (work_items, warnings) = crate::livephoto::classify(&target_paths, &class_opts, &cancel);
+        // livephoto's classify API deliberately has no cancellation
+        // knob (see its module docs); the engine checks its token
+        // immediately around the call instead.
+        let classified = classify_with_options(&target_paths, &class_opts);
+        let work_items = classified.items;
+        let warnings = classified.warnings;
         if cancel.is_cancelled() {
             summary.cancelled = true;
             return summary;
@@ -279,7 +284,7 @@ impl UploadManager {
 
         // ---- Worker pool: std::thread workers over an mpsc queue. ----
         let num_workers = std::cmp::min(opts.threads as usize, work_items.len());
-        let (work_tx, work_rx) = mpsc::channel::<UploadWorkItem>();
+        let (work_tx, work_rx) = mpsc::channel::<WorkItem>();
         // std mpsc receivers are single-consumer; share under a mutex. The
         // lock is held only for the recv call itself, so workers process in
         // parallel.
@@ -365,7 +370,7 @@ impl UploadManager {
 
 fn run_worker(
     worker: usize,
-    work_rx: &Arc<Mutex<mpsc::Receiver<UploadWorkItem>>>,
+    work_rx: &Arc<Mutex<mpsc::Receiver<WorkItem>>>,
     res_tx: &mpsc::Sender<FileResult>,
     opts: &UploadOptions,
     cancel: &CancellationToken,
@@ -413,37 +418,20 @@ fn run_worker(
 
 fn process_item(
     client: &PhotosClient,
-    item: &UploadWorkItem,
+    item: &WorkItem,
     opts: &UploadOptions,
     worker: usize,
     reporter: &Arc<dyn UploadReporter>,
     cancel: &CancellationToken,
 ) -> FileResult {
-    match &item.kind {
-        UploadWorkKind::Single => match &item.single {
-            Some(single) => {
-                let path = single.path.clone();
-                upload_single(client, &path, opts, worker, reporter, cancel)
-            }
-            None => FileResult {
-                file_path: work_primary_path(item),
-                outcome: Outcome::Failed,
-                media_key: None,
-                message: Some("invalid single-media work item".to_string()),
-            },
-        },
-        UploadWorkKind::LivePhoto => match &item.live_photo {
-            Some(pair) => {
-                let pair = pair.clone();
-                upload_live_photo(client, &pair, opts, worker, reporter, cancel)
-            }
-            None => FileResult {
-                file_path: work_primary_path(item),
-                outcome: Outcome::Failed,
-                media_key: None,
-                message: Some("invalid Live Photo work item".to_string()),
-            },
-        },
+    match item {
+        WorkItem::Single(path) => {
+            let path = path.clone();
+            upload_single(client, &path, opts, worker, reporter, cancel)
+        }
+        WorkItem::LivePhoto { still, video, .. } => {
+            upload_live_photo(client, still, video, opts, worker, reporter, cancel)
+        }
     }
 }
 
@@ -663,8 +651,8 @@ fn upload_component(
 
 /// Delete a Live Photo pair after a confirmed commit. Go removes the video
 /// first, then the still (livephoto_upload.go removeLivePhotoFiles).
-fn remove_live_photo_files(pair: &LivePhotoPair) -> Result<()> {
-    for path in [&pair.video_path, &pair.photo_path] {
+fn remove_live_photo_files(photo_path: &Path, video_path: &Path) -> Result<()> {
+    for path in [video_path, photo_path] {
         fs::remove_file(path).map_err(|e| {
             Error::Other(format!(
                 "Live Photo uploaded but failed to delete {}: {e}",
@@ -677,14 +665,15 @@ fn remove_live_photo_files(pair: &LivePhotoPair) -> Result<()> {
 
 fn upload_live_photo(
     client: &PhotosClient,
-    pair: &LivePhotoPair,
+    photo_path: &Path,
+    video_path: &Path,
     opts: &UploadOptions,
     worker: usize,
     reporter: &Arc<dyn UploadReporter>,
     cancel: &CancellationToken,
 ) -> FileResult {
-    let photo = pair.photo_path.clone();
-    let video = pair.video_path.clone();
+    let photo = photo_path.to_path_buf();
+    let video = video_path.to_path_buf();
 
     let photo_size = match fs::metadata(&photo) {
         Ok(info) => info.len(),
@@ -723,13 +712,14 @@ fn upload_live_photo(
     };
 
     if photo_remote.is_some() {
-        if opts.update_existing_photos_to_live {
+        if opts.update_existing_to_live {
             // Go: the still's bytes leave the batch total (it is not
             // re-uploaded); the video is uploaded and reconciled.
             reporter.total_bytes_delta(-(photo_size as i64));
             return reconcile_live_photo(
                 client,
-                pair,
+                &photo,
+                &video,
                 &photo_sha1,
                 &video_sha1,
                 video_size,
@@ -796,15 +786,15 @@ fn upload_live_photo(
 
     let taken = taken_unix_secs(&photo, opts);
     emit_status(reporter, worker, Stage::Finalizing, &photo, total, total);
-    let policy = live_photo_commit_policy(&opts.api);
+    let policy = client.live_photo_commit_policy();
     let media_key = match client.commit_live_photo(LivePhotoCreateRequest {
         photo_token,
         video_token,
         file_name: file_name_string(&photo),
-        photo_sha1,
-        video_sha1,
-        created_at_unix_secs: taken,
-        modified_at_unix_secs: taken,
+        photo_sha1: photo_sha1.to_vec(),
+        video_sha1: video_sha1.to_vec(),
+        created_at: MediaTimestamp::from_unix_secs(taken),
+        modified_at: MediaTimestamp::from_unix_secs(taken),
         storage_policy: policy.storage_policy,
         upload_quality: policy.upload_quality,
         upload_device_info: policy.upload_device_info,
@@ -818,7 +808,7 @@ fn upload_live_photo(
     emit_status(reporter, worker, Stage::Completed, &photo, total, total);
 
     if opts.delete_from_host {
-        if let Err(e) = remove_live_photo_files(pair) {
+        if let Err(e) = remove_live_photo_files(&photo, &video) {
             reporter.warning(PreflightWarning {
                 file_path: photo.clone(),
                 message: format!("local-cleanup-failed: {e}"),
@@ -843,7 +833,8 @@ fn upload_live_photo(
 #[allow(clippy::too_many_arguments)]
 fn reconcile_live_photo(
     client: &PhotosClient,
-    pair: &LivePhotoPair,
+    photo_path: &Path,
+    video_path: &Path,
     photo_sha1: &[u8; 20],
     video_sha1: &[u8; 20],
     video_size: u64,
@@ -852,8 +843,8 @@ fn reconcile_live_photo(
     reporter: &Arc<dyn UploadReporter>,
     cancel: &CancellationToken,
 ) -> FileResult {
-    let photo = pair.photo_path.clone();
-    let video = pair.video_path.clone();
+    let photo = photo_path.to_path_buf();
+    let video = video_path.to_path_buf();
 
     emit_status(reporter, worker, Stage::Uploading, &photo, 0, video_size);
     // Go reports progress against the video alone on this path.
@@ -880,15 +871,15 @@ fn reconcile_live_photo(
 
     let taken = taken_unix_secs(&photo, opts);
     emit_status(reporter, worker, Stage::Finalizing, &photo, video_size, video_size);
-    let policy = live_photo_commit_policy(&opts.api);
+    let policy = client.live_photo_commit_policy();
     let media_key = match client.reconcile_live_photo(LivePhotoReconcileRequest {
         video_token,
         // Go uses the VIDEO's file name for the reconcile request.
         file_name: file_name_string(&video),
-        photo_sha1: *photo_sha1,
-        video_sha1: *video_sha1,
-        created_at_unix_secs: taken,
-        modified_at_unix_secs: taken,
+        photo_sha1: photo_sha1.to_vec(),
+        video_sha1: video_sha1.to_vec(),
+        created_at: MediaTimestamp::from_unix_secs(taken),
+        modified_at: MediaTimestamp::from_unix_secs(taken),
         storage_policy: policy.storage_policy,
         upload_quality: policy.upload_quality,
         upload_device_info: policy.upload_device_info,
@@ -902,7 +893,7 @@ fn reconcile_live_photo(
     emit_status(reporter, worker, Stage::Completed, &photo, video_size, video_size);
 
     if opts.delete_from_host {
-        if let Err(e) = remove_live_photo_files(pair) {
+        if let Err(e) = remove_live_photo_files(&photo, &video) {
             reporter.warning(PreflightWarning {
                 file_path: photo.clone(),
                 message: format!("local-cleanup-failed: {e}"),
@@ -1229,7 +1220,7 @@ fn append_file(
     path: PathBuf,
     opts: &UploadOptions,
 ) {
-    if !opts.disable_unsupported_files_filter && !is_supported(&path) {
+    if !opts.disable_unsupported_filter && !is_supported(&path) {
         return;
     }
     // Dedupe on the canonical path (Go: filepath.Abs + EvalSymlinks, bucket
@@ -1352,21 +1343,12 @@ fn is_supported(path: &Path) -> bool {
 // Work-item helpers (upload.go uploadWorkPaths / uploadWorkPrimaryPath)
 // ---------------------------------------------------------------------------
 
-fn work_paths(item: &UploadWorkItem) -> Vec<PathBuf> {
-    match &item.kind {
-        UploadWorkKind::LivePhoto => match &item.live_photo {
-            Some(pair) => vec![pair.photo_path.clone(), pair.video_path.clone()],
-            None => Vec::new(),
-        },
-        UploadWorkKind::Single => match &item.single {
-            Some(single) => vec![single.path.clone()],
-            None => Vec::new(),
-        },
-    }
+fn work_paths(item: &WorkItem) -> Vec<PathBuf> {
+    item.paths().into_iter().map(|p| p.to_path_buf()).collect()
 }
 
-fn work_primary_path(item: &UploadWorkItem) -> PathBuf {
-    work_paths(item).into_iter().next().unwrap_or_default()
+fn work_primary_path(item: &WorkItem) -> PathBuf {
+    item.primary_path().to_path_buf()
 }
 
 // ---------------------------------------------------------------------------
@@ -1397,7 +1379,7 @@ mod tests {
             upload_threads: 7,
             pair_live_photos: true,
             skip_incomplete_live_photos: false,
-            update_existing_photos_to_live: true,
+            update_existing_to_live: true,
             album_name: "Holiday".to_string(),
             ..Default::default()
         };
@@ -1409,7 +1391,7 @@ mod tests {
         assert_eq!(captured.threads, 7);
         assert!(captured.pair_live_photos);
         assert!(!captured.skip_incomplete_live_photos);
-        assert!(captured.update_existing_photos_to_live);
+        assert!(captured.update_existing_to_live);
         assert_eq!(captured.album_name, "Holiday");
         assert!(!captured.album_auto_mode);
 
