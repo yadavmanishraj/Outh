@@ -135,6 +135,7 @@ pub fn card(children: Vec<View>) -> View {
 /// vertically centred. Controls carry no header/on/off text of their own.
 pub fn settings_row(title: &str, description: &str, control: View) -> View {
     Grid::new()
+        .horizontal_alignment(HorizontalAlignment::Stretch)
         .columns([GridLength::STAR, GridLength::Auto])
         .column_spacing(SPACE_L)
         .children(vec![
