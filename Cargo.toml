@@ -8,9 +8,12 @@ license = "MIT"
 repository = "https://github.com/yadavmanishraj/Outh"
 
 [workspace.dependencies]
-windows-reactor = "0.100"
-windows-reactor-setup = "0.100"
-windows-pickers = "0.100"
+# windows-pickers is not published to crates.io yet (only a 0.0.0 placeholder),
+# so all windows-rs deps come from the git repo at the studied HEAD to keep
+# them a single source (crates.io + git copies would be distinct crates).
+windows-reactor = { git = "https://github.com/microsoft/windows-rs", rev = "2672e615d9cc0771448a781f3b2fe34e7fd08c6a" }
+windows-reactor-setup = { git = "https://github.com/microsoft/windows-rs", rev = "2672e615d9cc0771448a781f3b2fe34e7fd08c6a" }
+windows-pickers = { git = "https://github.com/microsoft/windows-rs", rev = "2672e615d9cc0771448a781f3b2fe34e7fd08c6a" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha1 = "0.10"
