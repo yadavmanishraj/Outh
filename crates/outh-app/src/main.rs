@@ -471,15 +471,38 @@ impl Component for OuthApp {
                 }
             }
             Message::RetryFailed => {
-                // TODO(upload-redesign §4.6): re-queue only the failed
-                // rows' `ResultRow.path`s and start a run. Stub for the
-                // foundation round — the completion panel's button is
-                // wired to this message.
+                // Re-queue exactly the failed files (their full paths
+                // from the results) and start a fresh run through the
+                // same path as StartUpload (spec §4.6).
+                let failed: Vec<PathBuf> = self
+                    .results
+                    .iter()
+                    .filter(|row| row.outcome == "Failed")
+                    .map(|row| row.path.clone())
+                    .collect();
+                if !failed.is_empty() {
+                    self.paths = failed;
+                    self.results.clear();
+                    self.run_summary = None;
+                    upload::start_upload(self, context);
+                }
             }
             Message::RemoveCompletedFromQueue => {
-                // TODO(upload-redesign §4.6): prune queue paths whose
-                // results are Uploaded/Skipped. Stub for the foundation
-                // round.
+                // Prune queue entries whose files the last run uploaded
+                // or skipped (already in library / unsupported), then
+                // dismiss the completion panel (spec §4.6). Queued
+                // folders stay: results carry the individual files,
+                // not the folder they were expanded from.
+                let completed: Vec<PathBuf> = self
+                    .results
+                    .iter()
+                    .filter(|row| {
+                        row.outcome == "Uploaded" || row.outcome.starts_with("Skipped")
+                    })
+                    .map(|row| row.path.clone())
+                    .collect();
+                self.paths.retain(|path| !completed.contains(path));
+                self.run_summary = None;
             }
             Message::OpenGooglePhotos => {
                 // Same dependency-free browser launch as OpenSignInPage.
