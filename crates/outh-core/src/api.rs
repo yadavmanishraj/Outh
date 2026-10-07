@@ -45,16 +45,21 @@ use crate::create_media_items::{
 };
 use crate::credential::Credential;
 use crate::protocol::{
-    AddMediaToAlbum, AddMediaToAlbumField5Type, AddMediaToAlbumField6Type, CommitToken,
-    CommitUpload, CommitUploadField1Type, CommitUploadField1TypeField1Type,
-    CommitUploadField1TypeField4Type, CommitUploadField2Type, CreateAlbum, CreateAlbumField4Type,
-    CreateAlbumField4TypeField1Type, CreateAlbumField6Type, CreateAlbumField7Type,
-    CreateAlbumField8Type, CreateAlbumResponse, CreateMediaItemsResponse, GetUploadToken,
-    HashCheck, HashCheckField1Type, HashCheckField1TypeField1Type, HashCheckField1TypeField2Type,
-    RemoteMatches, ScottyToken,
+    AddMediaToAlbum, AddMediaToAlbumField5, CommitToken, CommitUpload, CommitUploadField1,
+    CommitUploadField4, CreateAlbum, CreateAlbumField6, CreateAlbumField7, CreateAlbumResponse,
+    CreateMediaItemsResponse, DeviceInfo, GetUploadToken, HashCheck, RemoteMatches,
 };
 use crate::types::CancellationToken;
 use crate::{Error, Result};
+
+/// Per-run client options have ONE definition, in [`crate::config`]
+/// (next to the preferences they derive from); re-exported here so
+/// existing `api::ApiOptions` paths keep working.
+pub use crate::config::ApiOptions;
+
+/// The Scotty finalize token type lives in [`crate::protocol`];
+/// re-exported here because this client's upload methods return it.
+pub use crate::protocol::ScottyToken;
 
 // ---------------------------------------------------------------------------
 // Endpoint / RPC constants — ALL in one place so protocol drift (study
@@ -177,15 +182,6 @@ pub fn calculate_backoff(attempt: u32) -> Duration {
 /// 429 only.
 pub fn should_retry_status(status: u16) -> bool {
     status >= 500 || status == 429
-}
-
-/// Per-run client options — CONTRACT.md, api.rs section.
-/// (`proxy` may be empty for no proxy.)
-#[derive(Clone, Debug, Default)]
-pub struct ApiOptions {
-    pub proxy: String,
-    pub saver: bool,
-    pub use_quota: bool,
 }
 
 /// The immutable device profile chosen at client construction.
@@ -449,17 +445,11 @@ impl PhotosClient {
     /// Returns the media key when present (`Some`), `None` when the
     /// library has no match (Go returns `""`).
     pub fn find_remote_media_by_hash(&self, sha1: &[u8; 20]) -> Result<Option<String>> {
-        let msg = HashCheck {
-            field1: Some(HashCheckField1Type {
-                field1: Some(HashCheckField1TypeField1Type {
-                    sha1_hash: sha1.to_vec(),
-                }),
-                // The empty field-2 message is part of the captured
-                // request shape; it must serialize as a zero-length
-                // message field, not be omitted.
-                field2: Some(HashCheckField1TypeField2Type {}),
-            }),
-        };
+        // HashCheck::new builds the exact Go nesting, including the
+        // empty field-2 message that is part of the captured request
+        // shape: it serializes as a zero-length message field rather
+        // than being omitted.
+        let msg = HashCheck::new(sha1);
         let mut body = Vec::new();
         msg.encode(&mut body);
 
@@ -470,7 +460,10 @@ impl PhotosClient {
         let decoded = RemoteMatches::decode(&resp.body).map_err(|e| {
             Error::Protocol(format!("failed to unmarshal protobuf: {e}"))
         })?;
-        Ok(remote_matches_media_key(&decoded).filter(|k| !k.is_empty()))
+        // RemoteMatches::media_key walks field1.field2.field2.media_key
+        // (gotohp generated/utils.go GetMediaKey) and yields None when
+        // any level is absent or the key is empty.
+        Ok(decoded.media_key().map(|k| k.to_string()))
     }
 
     // ------------------------------------------------------------------
@@ -536,9 +529,9 @@ impl PhotosClient {
         &self,
         session: &UploadSession,
         path: &Path,
-        progress: &dyn Fn(u64, u64),
+        progress: &(dyn Fn(u64, u64) + Sync),
         cancel: &CancellationToken,
-    ) -> Result<ScottyToken, Error> {
+    ) -> Result<ScottyToken> {
         // gotohp: stat first (needed for progress totals).
         let total = std::fs::metadata(path)
             .map_err(|e| Error::Io(e))?
@@ -583,10 +576,10 @@ impl PhotosClient {
         url: &str,
         path: &Path,
         total: u64,
-        progress: &dyn Fn(u64, u64),
-    ) -> Result<ScottyToken, Error> {
+        progress: &(dyn Fn(u64, u64) + Sync),
+    ) -> Result<ScottyToken> {
         let file = File::open(path)?;
-        let reader = CountingReader::new(file, total, progress);
+        let mut reader = CountingReader::new(file, total, progress);
 
         let bearer = self.bearer_token()?;
         let mut resp = self
@@ -598,7 +591,10 @@ impl PhotosClient {
             .header("Authorization", format!("Bearer {bearer}"))
             // No Content-Length: ureq streams the reader with chunked
             // transfer encoding, matching Go's ContentLength = -1.
-            .send(reader)
+            // `SendBody::from_reader` is ureq 3's chunked-body
+            // constructor for arbitrary `Read + Send + Sync` readers
+            // (a bare reader does not implement `AsSendBody`).
+            .send(ureq::SendBody::from_reader(&mut reader))
             .map_err(|e| Error::Http(format!("request failed: {e}")))?;
 
         let status = resp.status().as_u16();
@@ -640,21 +636,23 @@ impl PhotosClient {
         };
 
         let msg = CommitUpload {
-            field1: Some(CommitUploadField1Type {
-                field1: Some(CommitUploadField1TypeField1Type {
-                    field1: legacy.field1,
-                    field2: legacy.field2.clone(),
-                }),
+            field1: Some(CommitUploadField1 {
+                // CommitUploadField1's token field IS the legacy
+                // CommitToken message itself (protocol.rs), so the
+                // decoded token moves in whole.
+                field1: Some(legacy),
                 file_name: file.name.clone(),
                 sha1_hash: file.sha1.to_vec(),
-                field4: Some(CommitUploadField1TypeField4Type {
+                field4: Some(CommitUploadField4 {
                     file_last_modified_timestamp: taken,
                     field2: COMMIT_UNKNOWN_INT,
                 }),
                 quality: self.profile.commit_quality,
+                field8: None,
                 field10: 1,
+                field17: 0,
             }),
-            field2: Some(CommitUploadField2Type {
+            field2: Some(DeviceInfo {
                 model: self.profile.model.to_string(),
                 make: self.profile.make.to_string(),
                 android_api_version: self.profile.android_api_version,
@@ -763,9 +761,9 @@ impl PhotosClient {
             timestamp: now_unix(),
             field3: 1,
             media_keys: Vec::new(),
-            field6: Some(CreateAlbumField6Type {}),
-            field7: Some(CreateAlbumField7Type { field1: 3 }),
-            device_info: Some(CreateAlbumField8Type {
+            field6: Some(CreateAlbumField6 {}),
+            field7: Some(CreateAlbumField7 { field1: 3 }),
+            device_info: Some(DeviceInfo {
                 model: self.profile.model.to_string(),
                 make: self.profile.make.to_string(),
                 android_api_version: self.profile.android_api_version,
@@ -811,8 +809,8 @@ impl PhotosClient {
         let msg = AddMediaToAlbum {
             media_keys: media_keys.to_vec(),
             album_media_key: album_key.to_string(),
-            field5: Some(AddMediaToAlbumField5Type { field1: 2 }),
-            device_info: Some(AddMediaToAlbumField6Type {
+            field5: Some(AddMediaToAlbumField5 { field1: 2 }),
+            device_info: Some(DeviceInfo {
                 model: self.profile.model.to_string(),
                 make: self.profile.make.to_string(),
                 android_api_version: self.profile.android_api_version,
@@ -971,18 +969,10 @@ fn parse_create_media_items_response(body: &[u8]) -> Result<String> {
     ))
 }
 
-/// The media-key path of a HashCheck response — port of the hand-written
-/// getter in gotohp generated/utils.go:
-/// `field1.field2.field2.media_key`, empty when any level is absent.
-fn remote_matches_media_key(resp: &RemoteMatches) -> Option<String> {
-    resp.field1
-        .as_ref()?
-        .field2
-        .as_ref()?
-        .field2
-        .as_ref()
-        .map(|f| f.media_key.clone())
-}
+// (The media-key path of a HashCheck response —
+// `field1.field2.field2.media_key` — is `RemoteMatches::media_key` in
+// protocol.rs, port of the hand-written getter in gotohp
+// generated/utils.go.)
 
 // ---------------------------------------------------------------------------
 // Counting reader — port of gotohp core/progress_reader.go.
@@ -1003,15 +993,14 @@ pub struct CountingReader<'a> {
 
 /// The progress callback is invoked only from the thread performing the
 /// (synchronous) upload, sequentially, never concurrently; ureq reads
-/// the body on the calling thread. The `Send` impl exists solely to
-/// satisfy the body type's bounds.
-struct ProgressSink<'a>(&'a dyn Fn(u64, u64));
-
-// SAFETY: see ProgressSink docs — single-threaded, sequential invocation.
-unsafe impl Send for ProgressSink<'_> {}
+/// the body on the calling thread. Requiring the callback itself to be
+/// `Sync` makes the shared reference `Send + Sync`, so `CountingReader`
+/// satisfies the `Read + Send + Sync` bound of ureq's
+/// `SendBody::from_reader` with no unsafe impls.
+struct ProgressSink<'a>(&'a (dyn Fn(u64, u64) + Sync));
 
 impl<'a> CountingReader<'a> {
-    pub fn new(inner: File, total: u64, on_progress: &'a dyn Fn(u64, u64)) -> Self {
+    pub fn new(inner: File, total: u64, on_progress: &'a (dyn Fn(u64, u64) + Sync)) -> Self {
         CountingReader {
             inner,
             total,
