@@ -57,20 +57,31 @@ pub fn connect_account(app: &mut OuthApp, context: &ComponentContext<OuthApp>) {
 }
 
 /// User-facing copy for a failed Embedded Setup exchange (spec §5.2).
-/// Anything that is not one of the two known Google answers is treated
-/// as a reachability problem, which is what it almost always is.
+/// The two known Google answers get recovery copy; everything else
+/// SURFACES the core error detail (which never contains token
+/// material) — an earlier version of this copy called every failure
+/// "couldn't reach Google", which hid real answers like HTTP 403
+/// behind a network message and made failures undiagnosable.
 fn sign_in_error_copy(error: &outh_core::Error) -> String {
     match error {
         outh_core::Error::BadAuthentication => {
             "Google rejected that token — obtain a fresh oauth_token cookie and try again."
+                .to_string()
         }
         outh_core::Error::NeedsBrowser => {
             "Google wants a browser sign-in first — complete it on the Embedded \
              Setup page, then copy a fresh cookie."
+                .to_string()
         }
-        _ => "Couldn't reach Google — check your connection and proxy settings, then try again.",
+        outh_core::Error::Auth(detail) => format!(
+            "Sign-in didn't complete: {detail} Check your connection or VPN, \
+             then try again with a fresh token."
+        ),
+        other => format!(
+            "Sign-in didn't complete: {other}. Check your connection or VPN, \
+             then try again with a fresh token."
+        ),
     }
-    .to_string()
 }
 
 /// Avatar initials for an account: the first alphanumeric character of

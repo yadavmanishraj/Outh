@@ -355,19 +355,27 @@ impl EmbeddedSetupAuth {
                 Error::Auth(msg) => Error::Auth(msg),
                 other => Error::Auth(format!("contact Google authentication: {other}")),
             })?;
-        if !(200..300).contains(&status) {
-            // Go: any non-2xx (including the redirect responses the auth
-            // transport refuses to follow) is reported by status alone —
-            // never with the body/Location, which can carry token material.
-            return Err(Error::Auth(format!(
-                "Google authentication returned HTTP {status}"
-            )));
-        }
+        // Parse the body for an `Error=` code on ANY status and prefer
+        // it over the status: Google answers real auth rejections as
+        // HTTP 403 WITH an Error body (verified live 2026-10-07 — a
+        // junk token gets 403 + `Error=BadAuthentication`), so Go's
+        // status-first order (kept in the Go source) systematically
+        // misreports rejected tokens as network failures. Deliberate
+        // deviation, kept narrow: only the mapped Error code is read
+        // from an error response — never the raw body or a Location,
+        // which can carry token material — and a non-2xx WITHOUT an
+        // Error code (redirects included) is still reported by status
+        // alone, exactly like Go.
         let values = parse_auth_response(&body);
         if let Some(code) = values.get("Error") {
             if !code.is_empty() {
                 return Err(google_auth_error(code));
             }
+        }
+        if !(200..300).contains(&status) {
+            return Err(Error::Auth(format!(
+                "Google authentication returned HTTP {status}"
+            )));
         }
         let master_token = values.get("Token").cloned().unwrap_or_default();
         if master_token.is_empty() {
@@ -534,6 +542,35 @@ mod tests {
             .exchange("test-oauth-cookie-value", "0123456789abcdef")
             .unwrap_err();
         assert!(err.to_string().contains("307"), "{err}");
+    }
+
+    // Google answers real auth rejections as 403 WITH an Error body
+    // (verified live 2026-10-07); the Error code must win over the
+    // status so a rejected token is not misreported as a network
+    // failure. Regression test for the status-first misreport.
+    #[test]
+    fn error_body_wins_over_error_status() {
+        let transport = FakeTransport::new(403, "Error=BadAuthentication\n");
+        let auth = auth_with(transport, FakeValidator::ok());
+        let err = auth
+            .exchange("test-oauth-cookie-value", "0123456789abcdef")
+            .unwrap_err();
+        assert!(matches!(err, Error::BadAuthentication), "{err:?}");
+
+        let transport = FakeTransport::new(403, "Error=NeedsBrowser\n");
+        let auth = auth_with(transport, FakeValidator::ok());
+        let err = auth
+            .exchange("test-oauth-cookie-value", "0123456789abcdef")
+            .unwrap_err();
+        assert!(matches!(err, Error::NeedsBrowser), "{err:?}");
+
+        // A non-2xx WITHOUT an Error code still reports the status.
+        let transport = FakeTransport::new(500, "server exploded");
+        let auth = auth_with(transport, FakeValidator::ok());
+        let err = auth
+            .exchange("test-oauth-cookie-value", "0123456789abcdef")
+            .unwrap_err();
+        assert!(err.to_string().contains("500"), "{err}");
     }
 
     // Port of TestAddGoogleAccountUsesGoogleEmailAndReplacesCredential
