@@ -20,10 +20,12 @@
 //!   [B1] Preferences implements Default matching Go (CONTRACT.md states
 //!        this outright: "Default impl MUST match Go defaults").
 //!   [B2] Config/Preferences/Account derive serde Serialize+Deserialize
-//!        (CONTRACT.md: "Config: JSON (serde)") with default serde field
-//!        naming, i.e. JSON keys are the snake_case Rust field names, and
-//!        no field is skipped. Go never persists album_name/album_auto_mode
-//!        (koanf:"-"), so no assertion is made about those two keys.
+//!        (CONTRACT.md: "Config: JSON (serde)"). As landed in config.rs,
+//!        the JSON keys are camelCase — Preferences carries per-field
+//!        serde renames (useQuota, uploadThreads, ...) and Account uses
+//!        rename_all = "camelCase" — while album_name/album_auto_mode
+//!        are #[serde(skip)] (Go's koanf:"-"), so no assertion is made
+//!        about those two keys.
 //! ============================================================================
 
 use outh_core::config::{Account, Config, Preferences};
@@ -107,19 +109,20 @@ fn config_json_roundtrip_preserves_everything() {
 }
 
 #[test]
-fn config_json_shape_uses_snake_case_keys() {
+fn config_json_shape_uses_camel_case_keys() {
     // [B2] The on-disk JSON is user-inspectable (Go's file was too); pin the
     // key spellings so a silent rename is a deliberate, reviewed change.
+    // The spellings are the ones config.rs's serde renames define.
     let json = serde_json::to_string(&sample_config()).expect("serialize");
     for key in [
         "\"accounts\"",
-        "\"active_email\"",
+        "\"activeEmail\"",
         "\"preferences\"",
-        "\"upload_threads\":7",
-        "\"skip_incomplete_live_photos\":false",
-        "\"use_quota\":true",
-        "\"exclude_pattern\":\"*.tmp\"",
-        "\"needs_token_binding\":false",
+        "\"uploadThreads\":7",
+        "\"skipIncompleteLivePhotos\":false",
+        "\"useQuota\":true",
+        "\"excludePattern\":\"*.tmp\"",
+        "\"needsTokenBinding\":false",
     ] {
         assert!(json.contains(key), "config JSON missing {key}: {json}");
     }
@@ -152,7 +155,7 @@ fn preferences_missing_keys_fall_back_to_go_defaults() {
     assert_eq!(p.upload_threads, 3);
 
     let p: Preferences =
-        serde_json::from_str("{\"upload_threads\":7,\"recursive\":true}").expect("partial");
+        serde_json::from_str("{\"uploadThreads\":7,\"recursive\":true}").expect("partial");
     assert_eq!(p.upload_threads, 7);
     assert!(p.recursive);
     assert!(p.skip_incomplete_live_photos);

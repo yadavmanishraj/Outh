@@ -126,16 +126,14 @@ fn invalid_percent_escape_is_an_error() {
 #[test]
 fn looks_like_auth_string_cases_from_go_tests() {
     // Port of TestLooksLikeAuthString (core/googleauth_test.go) onto the
-    // closest contract surface: a value is a raw credential iff it parses
-    // AND carries both Email and Token. [A4] Assumes parse validates the
-    // presence of Email and Token; if the credential agent keeps parse
-    // purely syntactic, move the Email/Token presence checks to the config
-    // AddCredentials equivalent (Go validates required fields there:
-    // androidId, app, client_sig, Email, Token, lang, service) and drop
-    // the two negative assertions below to the config tests.
-    assert!(Credential::parse("androidId=1&Email=a%40x.com&Token=t").is_ok());
-    assert!(Credential::parse("  Email=a%40x.com&Token=t  ").is_ok());
-    assert!(Credential::parse("Email=a%40x.com").is_err()); // no Token
-    assert!(Credential::parse("oauth_token=<redacted>").is_err()); // an oauth_token, not a credential
-    assert!(Credential::parse("").is_err());
+    // real contract surface, `Credential::looks_like` — the direct port
+    // of Go's LooksLikeAuthString. (`Credential::parse` stays purely
+    // syntactic, like Go's url.ParseQuery; the Email+Token presence
+    // check lives in looks_like, and the fuller required-field check in
+    // `Credential::validate_import`, used by ConfigService::add_credentials.)
+    assert!(Credential::looks_like("androidId=1&Email=a%40x.com&Token=t"));
+    assert!(Credential::looks_like("  Email=a%40x.com&Token=t  "));
+    assert!(!Credential::looks_like("Email=a%40x.com")); // no Token
+    assert!(!Credential::looks_like("oauth_token=<redacted>")); // an oauth_token, not a credential
+    assert!(!Credential::looks_like(""));
 }

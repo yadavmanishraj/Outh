@@ -9,7 +9,7 @@
 //!
 //! This file compiles to nothing unless the `legacy_yaml_import` feature is
 //! added to outh-core AND the assumed API below is implemented:
-//!   ConfigService::load detects a legacy YAML file at the config path and
+//!   ConfigService::load_from detects a legacy YAML file at the config path and
 //!   migrates it (same constructor as config_service.rs tests).
 //! Until then it documents the exact migration cases the implementation
 //! must satisfy, using Go's own test data verbatim.
@@ -43,7 +43,7 @@ fn legacy_flat_yaml_migrates_to_sectioned_config() {
     .join("\n");
     std::fs::write(&path, legacy).expect("write legacy config");
 
-    let svc = ConfigService::load(&path, Arc::new(IdentityProtector)).expect("load legacy");
+    let svc = ConfigService::load_from(&path, Arc::new(IdentityProtector)).expect("load legacy");
     let config = svc.config();
     assert_eq!(config.active_email.as_deref(), Some("person@example.com"));
     assert_eq!(config.accounts.len(), 1);
@@ -88,7 +88,7 @@ fn legacy_sectioned_yaml_loads() {
     .join("\n");
     std::fs::write(&path, yaml).expect("write sectioned config");
 
-    let svc = ConfigService::load(&path, Arc::new(IdentityProtector)).expect("load sectioned");
+    let svc = ConfigService::load_from(&path, Arc::new(IdentityProtector)).expect("load sectioned");
     let config = svc.config();
     assert_eq!(config.accounts.len(), 1);
     assert!(config.preferences.saver);

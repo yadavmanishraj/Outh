@@ -13,8 +13,7 @@
 //! Both derivations agree on every fixture.
 //!
 //! ============================================================================
-//! ASSUMED API — READ BEFORE MERGING (written to CONTRACT.md; the protocol
-//! agent's final names win, adapt this file mechanically if they differ):
+//! API — as landed in `outh_core::protocol` (adapted at integration):
 //!
 //! * Types live in `outh_core::protocol`, named after the `.proto` messages
 //!   (PascalCase): GetUploadToken, HashCheck, CommitUpload, CommitToken,
@@ -22,36 +21,33 @@
 //!   CreateMediaItemsResponse, ScottyToken.
 //! * Nested message types are named `<Parent><ProtoFieldName>` WITHOUT the
 //!   "Type" suffix Go's generator appends (Go: `HashCheckField1Type` →
-//!   here: `HashCheckField1`). If the protocol agent kept the `Type`
-//!   suffix, rename accordingly.
+//!   here: `HashCheckField1`). The device block shared by CommitUpload
+//!   field 2, CreateAlbum field 8 and AddMediaToAlbum field 6 is the
+//!   single protocol type `DeviceInfo`.
 //! * Encoding follows CONTRACT.md exactly: `encode(&self, &mut Vec<u8>)`.
-//! * Decoding is assumed as an associated function
+//! * Decoding is an associated function
 //!   `decode(bytes: &[u8]) -> Result<Self, outh_core::Error>`.
-//! * Message-typed struct fields are assumed to be plain values (not
-//!   `Option<Box<_>>`) for the messages gotohp always populates.
-//! * Struct literals below set exactly the fields gotohp sets. One known
-//!   gap: CommitUpload's field-1 message also has proto fields 8 and 17
-//!   (empty-message types) which Go leaves nil; if the protocol structs
-//!   carry them, add them here as `None` (or `..Default::default()`).
+//! * Message-typed struct fields are `Option<_>`; struct literals below
+//!   wrap the fields gotohp sets in `Some(...)`. CommitUpload's field-1
+//!   message also carries proto fields 8 (raw bytes, `None` — Go never
+//!   constructs it) and 17 (varint, `0` — omitted on the wire).
 //! * Struct field names are the proto field names in snake_case
 //!   (`file_size_bytes`, `sha1_hash`, `file_name`, ...); the unnamed
 //!   `fieldN` proto fields keep their `fieldN` names.
 //! * `ScottyToken::parse(&[u8]) -> Result<ScottyToken, Error>` +
-//!   `as_bytes(&self) -> &[u8]` mirror Go's `ParseScottyFinalizeToken` and
+//!   `raw(&self) -> &[u8]` mirror Go's `ParseScottyFinalizeToken` and
 //!   the opaque `Raw` field (core/scotty_token.go).
-//! * `RemoteMatches::media_key()` and `CreateMediaItemsResponse::media_key()`
+//! * `RemoteMatches::media_key() -> Option<&str>` and
+//!   `CreateMediaItemsResponse::first_media_key() -> Option<&str>`
 //!   mirror the hand-written Go helpers (`generated/utils.go GetMediaKey`,
-//!   `core/api.go parseCreateMediaItemsResponse`). If the protocol agent
-//!   exposes only the nested fields instead, walk
-//!   field1.field2.field2.media_key / item[0].result_item.media_key.
+//!   `core/api.go parseCreateMediaItemsResponse`).
 //! ============================================================================
 
 use outh_core::protocol::{
-    AddMediaToAlbum, AddMediaToAlbumField5, AddMediaToAlbumField6, CommitToken, CommitUpload,
-    CommitUploadField1, CommitUploadField1Field1, CommitUploadField1Field4, CommitUploadField2,
-    CreateAlbum, CreateAlbumField4, CreateAlbumField4Field1, CreateAlbumField6, CreateAlbumField7,
-    CreateAlbumField8, CreateMediaItemsResponse, GetUploadToken, HashCheck, HashCheckField1,
-    HashCheckField1Field1, HashCheckField1Field2, RemoteMatches, ScottyToken,
+    AddMediaToAlbum, AddMediaToAlbumField5, CommitToken, CommitUpload, CommitUploadField1,
+    CommitUploadField4, CreateAlbum, CreateAlbumField4, CreateAlbumField4Field1, CreateAlbumField6,
+    CreateAlbumField7, CreateMediaItemsResponse, DeviceInfo, GetUploadToken, HashCheck,
+    HashCheckField1, HashCheckField1Field1, HashCheckField1Field2, RemoteMatches, ScottyToken,
 };
 
 // ---- Fixed inputs (shared verbatim with tools/gen-fixtures/main.go) ----
@@ -154,8 +150,8 @@ fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn device_info() -> CommitUploadField2 {
-    CommitUploadField2 {
+fn device_info() -> DeviceInfo {
+    DeviceInfo {
         model: "Pixel XL".to_string(),
         make: "Google".to_string(),
         android_api_version: 28,
@@ -167,21 +163,24 @@ fn commit_upload(quality: i64, model: &str) -> CommitUpload {
     let mut device = device_info();
     device.model = model.to_string();
     CommitUpload {
-        field1: CommitUploadField1 {
-            field1: CommitUploadField1Field1 {
+        field1: Some(CommitUploadField1 {
+            // The token field is the legacy CommitToken message itself.
+            field1: Some(CommitToken {
                 field1: 2,
                 field2: OPAQUE_TOKEN.to_vec(),
-            },
+            }),
             file_name: FILE_NAME.to_string(),
             sha1_hash: SHA1_EMPTY.to_vec(),
-            field4: CommitUploadField1Field4 {
+            field4: Some(CommitUploadField4 {
                 file_last_modified_timestamp: TIMESTAMP,
                 field2: UNKNOWN_INT,
-            },
+            }),
             quality,
+            field8: None,
             field10: 1,
-        },
-        field2: device,
+            field17: 0,
+        }),
+        field2: Some(device),
         field3: vec![1, 3],
     }
 }
@@ -205,14 +204,14 @@ fn get_upload_token_bytes_match_go() {
 #[test]
 fn hash_check_bytes_match_go() {
     let msg = HashCheck {
-        field1: HashCheckField1 {
-            field1: HashCheckField1Field1 {
+        field1: Some(HashCheckField1 {
+            field1: Some(HashCheckField1Field1 {
                 sha1_hash: SHA1_EMPTY.to_vec(),
-            },
+            }),
             // The empty second message MUST be emitted (len 0), exactly as
             // Go's non-nil &HashCheckField1TypeField2Type{} is.
-            field2: HashCheckField1Field2 {},
-        },
+            field2: Some(HashCheckField1Field2 {}),
+        }),
     };
     let mut buf = Vec::new();
     msg.encode(&mut buf);
@@ -241,17 +240,17 @@ fn create_album_bytes_match_go() {
         timestamp: TIMESTAMP,
         field3: 1,
         media_keys: vec![CreateAlbumField4 {
-            field1: CreateAlbumField4Field1 {
+            field1: Some(CreateAlbumField4Field1 {
                 media_key: "MEDIAKEY1".to_string(),
-            },
+            }),
         }],
-        field6: CreateAlbumField6 {},
-        field7: CreateAlbumField7 { field1: 3 },
-        device_info: CreateAlbumField8 {
+        field6: Some(CreateAlbumField6 {}),
+        field7: Some(CreateAlbumField7 { field1: 3 }),
+        device_info: Some(DeviceInfo {
             model: "Pixel XL".to_string(),
             make: "Google".to_string(),
             android_api_version: 28,
-        },
+        }),
     };
     let mut buf = Vec::new();
     msg.encode(&mut buf);
@@ -263,12 +262,12 @@ fn add_media_to_album_bytes_match_go() {
     let msg = AddMediaToAlbum {
         media_keys: vec!["MEDIAKEY1".to_string(), "MEDIAKEY2".to_string()],
         album_media_key: "ALBUMKEY".to_string(),
-        field5: AddMediaToAlbumField5 { field1: 2 },
-        device_info: AddMediaToAlbumField6 {
+        field5: Some(AddMediaToAlbumField5 { field1: 2 }),
+        device_info: Some(DeviceInfo {
             model: "Pixel XL".to_string(),
             make: "Google".to_string(),
             android_api_version: 28,
-        },
+        }),
         timestamp: TIMESTAMP,
     };
     let mut buf = Vec::new();
@@ -288,17 +287,17 @@ fn commit_token_decodes() {
 #[test]
 fn remote_matches_media_key_path() {
     let resp = RemoteMatches::decode(&hex_decode(REMOTE_MATCHES_HEX)).expect("decode RemoteMatches");
-    assert_eq!(resp.media_key(), "MEDIAKEY1");
-    // An empty response (hash not in library) yields an empty key, not an error.
+    assert_eq!(resp.media_key(), Some("MEDIAKEY1"));
+    // An empty response (hash not in library) yields no key, not an error.
     let empty = RemoteMatches::decode(&[]).expect("decode empty RemoteMatches");
-    assert_eq!(empty.media_key(), "");
+    assert_eq!(empty.media_key(), None);
 }
 
 #[test]
-fn create_media_items_response_media_key() {
+fn create_media_items_response_first_media_key() {
     let resp = CreateMediaItemsResponse::decode(&hex_decode(CREATE_MEDIA_ITEMS_RESPONSE_HEX))
         .expect("decode CreateMediaItemsResponse");
-    assert_eq!(resp.media_key(), "MEDIAKEY1");
+    assert_eq!(resp.first_media_key(), Some("MEDIAKEY1"));
 }
 
 // ---- Scotty token validation (core/scotty_token.go) ----------------------------
@@ -309,7 +308,7 @@ fn scotty_token_accepts_valid_envelope_and_keeps_raw_bytes() {
     let token = ScottyToken::parse(&raw).expect("valid Scotty token");
     // The raw envelope is preserved byte-for-byte: Live Photo commits embed
     // it unchanged (core/create_media_items.go), so no decode/re-encode.
-    assert_eq!(token.as_bytes(), raw.as_slice());
+    assert_eq!(token.raw(), raw.as_slice());
 }
 
 #[test]

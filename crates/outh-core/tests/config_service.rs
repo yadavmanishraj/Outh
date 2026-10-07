@@ -9,32 +9,25 @@
 //! itself, and core tests use an identity protector.
 //!
 //! ============================================================================
-//! ASSUMED API — CONTRACT.md names the pieces but not the methods
-//! ("ConfigService { load/save, CRUD, active account; protector injected }",
-//!  "the app provides a DPAPI implementation on Windows, core tests use the
-//!   identity protector"). The names below are the most direct reading; the
-//! config agent's final API wins and this file adapts mechanically:
-//!   outh_core::config::{
-//!       ConfigService, IdentityProtector,
-//!   }
-//!   outh_core::config::CredentialProtector  (trait, Send + Sync)
-//!       fn protect(&self, plain: &str) -> Result<String, Error>
-//!       fn unprotect(&self, stored: &str) -> Result<String, Error>
-//!   ConfigService::load(path: &Path, protector: Arc<dyn CredentialProtector>)
+//! API — as landed in `outh_core::config` (adapted at integration):
+//!   ConfigService::load_from(path: &Path, protector: Arc<dyn CredentialProtector>)
 //!       -> Result<ConfigService, Error>   (missing file = defaults)
 //!   ConfigService::config(&self) -> &Config
-//!   ConfigService::config_mut(&mut self) -> &mut Config
-//!   ConfigService::save(&mut self) -> Result<(), Error>
-//! If the protector trait lands in credential.rs instead of config.rs, only
-//! the use-line changes.
+//!   ConfigService::save(&self) -> Result<(), Error>
+//!   ConfigService::upsert_credential(&mut self, credential: &str)
+//!       -> Result<String, Error>   (insert/replace + select; saves)
+//!   ConfigService::update_preferences(&mut self, f: impl FnOnce(&mut Preferences))
+//!       -> Result<(), Error>       (mutate + save)
+//! There is no `config_mut`: state changes go through the mutation
+//! methods above, which persist immediately, mirroring Go's
+//! `updateAppConfig`. The tests therefore seed state through
+//! `upsert_credential` + `update_preferences` (see `seed`).
 //! ============================================================================
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use outh_core::config::{
-    Account, Config, ConfigService, CredentialProtector, IdentityProtector, Preferences,
-};
+use outh_core::config::{ConfigService, CredentialProtector, IdentityProtector};
 use outh_core::Error;
 
 fn temp_config_path(tag: &str) -> PathBuf {
@@ -45,36 +38,42 @@ fn temp_config_path(tag: &str) -> PathBuf {
 
 /// A test protector that visibly transforms the value, so the tests can
 /// prove the service actually routes credentials through the protector.
+/// The transform (prefix + reversed text) is reversible but does not
+/// embed the plaintext verbatim — a plain `format!("protected:{plain}")`
+/// would leave the raw credential as a substring of the stored file and
+/// defeat the at-rest assertion below.
 struct PrefixProtector;
 
 impl CredentialProtector for PrefixProtector {
     fn protect(&self, plain: &str) -> Result<String, Error> {
-        Ok(format!("protected:{plain}"))
+        Ok(format!(
+            "protected:{}",
+            plain.chars().rev().collect::<String>()
+        ))
     }
     fn unprotect(&self, stored: &str) -> Result<String, Error> {
         stored
             .strip_prefix("protected:")
-            .map(str::to_string)
+            .map(|rest| rest.chars().rev().collect())
             .ok_or_else(|| Error::Config("stored credential lacks prefix".to_string()))
     }
 }
 
-const RAW_CREDENTIAL: &str = "Email=person%40example.com&Token=aas_et%2Ftest-master-token";
+/// Carries `assertion_jwt`, so `Credential::needs_token_binding` derives
+/// `true` for this account (see the reload assertions below).
+const RAW_CREDENTIAL: &str = "Email=person%40example.com&Token=aas_et%2Ftest-master-token&assertion_jwt=eyJhbGciOiJFUzI1NiJ9.payload.sig";
 
-fn config_with_account() -> Config {
-    Config {
-        accounts: vec![Account {
-            email: "person@example.com".to_string(),
-            credential: RAW_CREDENTIAL.to_string(),
-            needs_token_binding: true,
-        }],
-        active_email: Some("person@example.com".to_string()),
-        preferences: Preferences {
-            upload_threads: 7,
-            recursive: true,
-            ..Preferences::default()
-        },
-    }
+/// Install the fixture account + preferences through the service's real
+/// mutation API: `upsert_credential` derives the email and the
+/// token-binding flag from the credential and selects the account;
+/// `update_preferences` sets the non-default preferences.
+fn seed(svc: &mut ConfigService) {
+    svc.upsert_credential(RAW_CREDENTIAL).expect("upsert credential");
+    svc.update_preferences(|p| {
+        p.upload_threads = 7;
+        p.recursive = true;
+    })
+    .expect("update preferences");
 }
 
 #[test]
@@ -82,7 +81,7 @@ fn missing_file_loads_defaults() {
     // Port of TestLoadConfigMissingFileUsesDefaults.
     let path = temp_config_path("missing");
     let _ = std::fs::remove_file(&path);
-    let svc = ConfigService::load(&path, Arc::new(IdentityProtector)).expect("load missing file");
+    let svc = ConfigService::load_from(&path, Arc::new(IdentityProtector)).expect("load missing file");
     let config = svc.config();
     assert!(config.accounts.is_empty());
     assert_eq!(config.active_email, None);
@@ -95,12 +94,12 @@ fn save_then_load_roundtrips_through_disk() {
     let path = temp_config_path("roundtrip");
     let _ = std::fs::remove_file(&path);
 
-    let mut svc = ConfigService::load(&path, Arc::new(IdentityProtector)).expect("load");
-    *svc.config_mut() = config_with_account();
+    let mut svc = ConfigService::load_from(&path, Arc::new(IdentityProtector)).expect("load");
+    seed(&mut svc);
     svc.save().expect("save");
     assert!(path.exists(), "config file must exist after save");
 
-    let loaded = ConfigService::load(&path, Arc::new(IdentityProtector)).expect("reload");
+    let loaded = ConfigService::load_from(&path, Arc::new(IdentityProtector)).expect("reload");
     let config = loaded.config();
     assert_eq!(config.accounts.len(), 1);
     assert_eq!(config.accounts[0].email, "person@example.com");
@@ -119,8 +118,8 @@ fn credentials_are_protected_at_rest() {
     let path = temp_config_path("protected");
     let _ = std::fs::remove_file(&path);
 
-    let mut svc = ConfigService::load(&path, Arc::new(PrefixProtector)).expect("load");
-    *svc.config_mut() = config_with_account();
+    let mut svc = ConfigService::load_from(&path, Arc::new(PrefixProtector)).expect("load");
+    seed(&mut svc);
     svc.save().expect("save");
 
     let on_disk = std::fs::read_to_string(&path).expect("read saved config");
@@ -133,7 +132,7 @@ fn credentials_are_protected_at_rest() {
         "protected credential form expected in the config file"
     );
 
-    let loaded = ConfigService::load(&path, Arc::new(PrefixProtector)).expect("reload");
+    let loaded = ConfigService::load_from(&path, Arc::new(PrefixProtector)).expect("reload");
     assert_eq!(loaded.config().accounts[0].credential, RAW_CREDENTIAL);
 }
 
@@ -144,15 +143,16 @@ fn save_replaces_existing_file_and_leaves_no_temp() {
     let path = temp_config_path("atomic");
     let _ = std::fs::remove_file(&path);
 
-    let mut svc = ConfigService::load(&path, Arc::new(IdentityProtector)).expect("load");
+    let mut svc = ConfigService::load_from(&path, Arc::new(IdentityProtector)).expect("load");
     svc.save().expect("first save");
     let first = std::fs::read_to_string(&path).expect("read first");
 
-    svc.config_mut().preferences.upload_threads = 9;
+    svc.update_preferences(|p| p.upload_threads = 9)
+        .expect("update preferences");
     svc.save().expect("second save");
     let second = std::fs::read_to_string(&path).expect("read second");
     assert_ne!(first, second);
-    assert!(second.contains("\"upload_threads\":9") || second.contains("\"upload_threads\": 9"));
+    assert!(second.contains("\"uploadThreads\":9") || second.contains("\"uploadThreads\": 9"));
 
     let siblings: Vec<_> = std::fs::read_dir(path.parent().expect("parent"))
         .expect("read dir")
@@ -162,6 +162,6 @@ fn save_replaces_existing_file_and_leaves_no_temp() {
         .collect();
     assert!(siblings.is_empty(), "temp files left behind: {siblings:?}");
 
-    let loaded = ConfigService::load(&path, Arc::new(IdentityProtector)).expect("reload");
+    let loaded = ConfigService::load_from(&path, Arc::new(IdentityProtector)).expect("reload");
     assert_eq!(loaded.config().preferences.upload_threads, 9);
 }
