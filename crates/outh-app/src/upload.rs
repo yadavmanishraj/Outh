@@ -18,11 +18,12 @@ use outh_core::api::{ApiOptions, PhotosClient};
 use outh_core::config::Preferences;
 use outh_core::credential::Credential;
 use outh_core::types::{Stage, UploadReporter};
-use outh_core::upload::{UploadManager, UploadOptions};
+use outh_core::upload::{RunSummary, UploadManager, UploadOptions};
 use windows_reactor::*;
 
 use crate::reporter::SenderReporter;
-use crate::{AlbumMode, Message, OuthApp, Section};
+use crate::theme;
+use crate::{AlbumMode, Message, Note, OuthApp, RunEnded, Section};
 
 pub fn stage_label(stage: &Stage) -> &'static str {
     match stage {
@@ -78,21 +79,19 @@ fn build_upload_options(
     }
 }
 
-/// The blocking half of a run, on the dedicated upload thread.
-///
-/// INTEGRATION ASSUMPTIONS isolated here (CONTRACT.md gives
-/// `UploadManager::new(photos_factory, reporter)` and
-/// `run(inputs, opts, cancel) -> RunSummary` without fixing the factory
-/// type): the factory is a closure called to build a `PhotosClient` from
-/// the run's credential + `ApiOptions`, and the returned `RunSummary` is
-/// ignored — all run outcomes reach the UI through the reporter.
+/// The blocking half of a run, on the dedicated upload thread. Returns
+/// core's `RunSummary` (spec §3.5): the thread converts it to the app's
+/// `RunEnded` and delivers it as `Message::UploadRunEnded`, so terminal
+/// counts come from the authoritative summary — streamed reporter
+/// outcomes remain the per-file detail. (The factory is a closure called
+/// to build a `PhotosClient` from the run's credential + `ApiOptions`.)
 fn run_blocking(
     credential_string: String,
     reporter: Arc<dyn UploadReporter>,
     inputs: Vec<PathBuf>,
     options: UploadOptions,
     cancel: outh_core::types::CancellationToken,
-) -> String {
+) -> RunSummary {
     // The manager passes each run's ApiOptions (built from preferences by
     // build_upload_options) to the factory; the factory only adds the
     // run's credential.
@@ -101,8 +100,7 @@ fn run_blocking(
         PhotosClient::new(credential, api.clone())
     });
     let manager = UploadManager::new(factory, reporter);
-    let _summary = manager.run(inputs, options, cancel);
-    "Upload finished.".to_string()
+    manager.run(inputs, options, cancel)
 }
 
 /// Handles Message::StartUpload. Runs on the UI thread; only *starts* the
@@ -119,18 +117,20 @@ pub fn start_upload(app: &mut OuthApp, context: &ComponentContext<OuthApp>) {
         .or_else(|| app.accounts.first())
         .cloned();
     let Some(account) = account else {
-        app.upload_note =
-            Some("Add an account first (Accounts section), then start the upload.".to_string());
+        app.upload_note = Some(Note::warning(
+            "Add an account first (Accounts section), then start the upload.",
+        ));
         app.section = Section::Accounts;
         return;
     };
     if app.paths.is_empty() {
-        app.upload_note = Some("Add at least one file or folder to upload.".to_string());
+        app.upload_note = Some(Note::warning("Add at least one file or folder to upload."));
         return;
     }
     if app.album_mode == AlbumMode::Named && app.album_name.trim().is_empty() {
-        app.upload_note =
-            Some("Type an album name, or choose a different album option.".to_string());
+        app.upload_note = Some(Note::warning(
+            "Type an album name, or choose a different album option.",
+        ));
         return;
     }
 
@@ -140,12 +140,13 @@ pub fn start_upload(app: &mut OuthApp, context: &ComponentContext<OuthApp>) {
     app.total_files = 0;
     app.total_bytes = 0;
     app.album_status = None;
+    app.run_summary = None;
     app.cancel_requested = false;
 
     let cancel = outh_core::types::CancellationToken::new();
     app.cancel_token = Some(cancel.clone());
     app.running = true;
-    app.upload_note = Some(format!("Uploading as {}…", account.email));
+    app.upload_note = Some(Note::info(format!("Uploading as {}…", account.email)));
 
     let reporter: Arc<dyn UploadReporter> = Arc::new(SenderReporter::new(context.completion()));
     let completion = context.completion();
@@ -154,10 +155,10 @@ pub fn start_upload(app: &mut OuthApp, context: &ComponentContext<OuthApp>) {
     let credential_string = account.credential.clone();
 
     std::thread::spawn(move || {
-        let note = run_blocking(credential_string, reporter, inputs, options, cancel);
+        let summary = run_blocking(credential_string, reporter, inputs, options, cancel);
         // Terminal signal, independent of the reporter's upload_stop: the
         // UI leaves the "running" state even if the run ended early.
-        let _ = completion.complete(Message::UploadRunEnded(note));
+        let _ = completion.complete(Message::UploadRunEnded(RunEnded::from(summary)));
     });
 }
 
@@ -275,7 +276,10 @@ pub fn view(app: &OuthApp, context: &mut ViewContext<OuthApp>) -> View {
     );
 
     if let Some(note) = &app.upload_note {
-        children.push(TextBlock::new().text(note.clone()).into());
+        children.push(theme::note_bar(
+            note,
+            context.message(Message::DismissUploadNote),
+        ));
     }
 
     // Aggregate progress: bytes are summed from the per-worker rows (the

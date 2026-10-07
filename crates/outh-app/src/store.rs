@@ -49,6 +49,12 @@ pub fn load() -> (Option<ConfigService>, Option<String>) {
     }
 }
 
+/// Validated raw-credential import (spec §5.3): core checks the required
+/// fields and rejects duplicates, returning the imported account's email.
+pub fn add_credentials(service: &mut ConfigService, raw: &str) -> Result<String> {
+    service.add_credentials(raw)
+}
+
 pub fn add_account(service: &mut ConfigService, account: Account) -> Result<()> {
     // Core upserts by the credential string (email + token-binding flag are
     // derived from it inside the service).
