@@ -779,7 +779,7 @@ impl Component for OuthApp {
         context.window_visuals(
             WindowVisuals::new()
                 .backdrop(WindowBackdrop::Mica)
-                .client_size(1100.0, 720.0)
+                .client_size(980.0, 560.0)
                 .constraints(WindowConstraints {
                     min_width: Some(640.0),
                     min_height: Some(480.0),
@@ -836,6 +836,7 @@ impl Component for OuthApp {
             )
         };
         let navigation = NavigationView::new()
+            .is_back_button_visible(NavigationViewBackButtonVisible::Collapsed)
             .pane_display_mode(NavigationViewPaneDisplayMode::Auto)
             .is_settings_visible(false)
             .on_selected_tag_changed(context.callback(|tag: Option<Rc<str>>| {

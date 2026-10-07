@@ -35,6 +35,7 @@ pub const SPACE_S: f64 = 8.0;
 pub const SPACE_M: f64 = 12.0;
 pub const SPACE_L: f64 = 16.0;
 pub const SPACE_XL: f64 = 24.0;
+#[allow(dead_code)]
 pub const SPACE_XXL: f64 = 32.0;
 
 pub const PAGE_PADDING_X: f64 = 24.0;
