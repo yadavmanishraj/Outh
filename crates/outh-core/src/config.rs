@@ -84,6 +84,12 @@ pub struct Preferences {
     pub exclude_pattern: String,
     #[serde(rename = "uploadThreads")]
     pub upload_threads: u32,
+    /// App theme: "system" | "light" | "dark" (app-level addition — Go
+    /// has no equivalent). Persisted, unlike the album fields below;
+    /// `#[serde(default)]` keeps pre-theme config files loading (empty
+    /// string = system).
+    #[serde(default)]
+    pub theme: String,
     /// Session-only (Go: `koanf:"-"`), never written to disk.
     #[serde(skip)]
     pub album_name: String,
@@ -110,6 +116,7 @@ impl Default for Preferences {
             set_date_from_filename: false,
             exclude_pattern: String::new(),
             upload_threads: 3,
+            theme: String::new(),
             album_name: String::new(),
             album_auto_mode: false,
         }

@@ -230,6 +230,7 @@ pub enum Message {
 
     // Settings section
     PrefBoolChanged(PrefBool, bool),
+    ThemeChanged(Option<usize>),
     PrefThreadsChanged(Option<f64>),
     PrefProxyChanged(String),
     PrefExcludePatternChanged(String),
@@ -425,15 +426,9 @@ impl Component for OuthApp {
             confirm: None,
         };
         app.refresh_from_store();
-        // Album choice is session state, initialised from the loaded
-        // preferences (Go keeps it out of the persisted file; the Rust
-        // Preferences struct carries the fields, so honour them at start).
-        if app.prefs.album_auto_mode {
-            app.album_mode = AlbumMode::Auto;
-        } else if !app.prefs.album_name.trim().is_empty() {
-            app.album_mode = AlbumMode::Named;
-            app.album_name = app.prefs.album_name.clone();
-        }
+        // Album choice is session-only state (the Preferences album
+        // fields are serde(skip), exactly like Go) — every launch starts
+        // at "No album".
         // First-run routing (F-01): with no account there is nothing to
         // upload with, so land on Accounts where the sign-in card is the
         // hero. The Upload page's empty state covers later states.
@@ -643,22 +638,8 @@ impl Component for OuthApp {
             }
             Message::AlbumModeChanged(index) => {
                 self.album_mode = AlbumMode::from_index(index);
-                // Persist the album choice deliberately (R-25): create()
-                // restores it from Preferences, so the UI must write it —
-                // previously nothing did, and the restore read stale data.
-                self.prefs.album_auto_mode = self.album_mode == AlbumMode::Auto;
-                if self.album_mode == AlbumMode::Named {
-                    self.prefs.album_name = self.album_name.clone();
-                }
-                self.persist_preferences();
             }
-            Message::AlbumNameChanged(value) => {
-                self.album_name = value;
-                if self.album_mode == AlbumMode::Named {
-                    self.prefs.album_name = self.album_name.clone();
-                    self.persist_preferences();
-                }
-            }
+            Message::AlbumNameChanged(value) => self.album_name = value,
             Message::StartUpload => upload::start_upload(self, context),
             Message::CancelUpload => {
                 if let Some(token) = &self.cancel_token {
@@ -827,6 +808,15 @@ impl Component for OuthApp {
             }
 
             // ---- Settings section ----
+            Message::ThemeChanged(index) => {
+                self.prefs.theme = match index {
+                    Some(1) => "light",
+                    Some(2) => "dark",
+                    _ => "system",
+                }
+                .to_string();
+                self.persist_preferences();
+            }
             Message::PrefBoolChanged(field, value) => {
                 // Enabling delete-originals is one of the three
                 // irreversible decisions reserved for a dialog (R-9):
@@ -862,6 +852,11 @@ impl Component for OuthApp {
         context.window_title("Outh");
         context.window_visuals(
             WindowVisuals::new()
+                .theme(match self.prefs.theme.as_str() {
+                    "light" => WindowTheme::Light,
+                    "dark" => WindowTheme::Dark,
+                    _ => WindowTheme::System,
+                })
                 .backdrop(WindowBackdrop::Mica)
                 .client_size(980.0, 560.0)
                 .constraints(WindowConstraints {

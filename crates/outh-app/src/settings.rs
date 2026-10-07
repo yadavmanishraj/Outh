@@ -43,6 +43,24 @@ pub fn view(app: &OuthApp, context: &mut ViewContext<OuthApp>) -> View {
         ));
     }
 
+    // ---- Appearance ----
+    children.push(theme::section_title("Appearance"));
+    children.push(theme::card(vec![
+        RadioButtons::new()
+            .items_source(["System", "Light", "Dark"])
+            .selected_index(Some(match prefs.theme.as_str() {
+                "light" => 1,
+                "dark" => 2,
+                _ => 0,
+            }))
+            .on_selection_changed(
+                context.callback(|index: Option<usize>| Message::ThemeChanged(index)),
+            )
+            .header("Theme")
+            .into(),
+        theme::caption("System follows your Windows setting."),
+    ]));
+
     // ---- Storage & identity ----
     children.push(theme::section_title("Storage & identity"));
     children.push(theme::card(vec![
