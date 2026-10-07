@@ -1,6 +1,22 @@
-[package]
-name = "Outh"
-version = "0.1.0"
-edition = "2024"
+[workspace]
+resolver = "2"
+members = ["crates/outh-core", "crates/outh-app"]
 
-[dependencies]
+[workspace.package]
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/yadavmanishraj/Outh"
+
+[workspace.dependencies]
+windows-reactor = "0.100"
+windows-reactor-setup = "0.100"
+windows-pickers = "0.100"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha1 = "0.10"
+base64 = "0.22"
+regex = "1"
+ureq = { version = "3", features = ["rustls"] }
+
+[profile.release]
+lto = "thin"
