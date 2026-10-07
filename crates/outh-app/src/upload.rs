@@ -23,7 +23,7 @@ use windows_reactor::*;
 
 use crate::reporter::SenderReporter;
 use crate::theme;
-use crate::{AlbumMode, Message, Note, OuthApp, RunEnded, Section};
+use crate::{AlbumMode, Message, Note, NoteSeverity, OuthApp, RunEnded, Section};
 
 pub fn stage_label(stage: &Stage) -> &'static str {
     match stage {
@@ -163,79 +163,254 @@ pub fn start_upload(app: &mut OuthApp, context: &ComponentContext<OuthApp>) {
 }
 
 pub fn view(app: &OuthApp, context: &mut ViewContext<OuthApp>) -> View {
-    let sender = context.sender();
     let mut children: Vec<View> = Vec::new();
 
-    children.push(
-        TextBlock::new()
-            .text("Upload")
-            .font_size(20.0)
-            .into(),
-    );
-    children.push(
-        TextBlock::new()
-            .text(format!("Files and folders ({})", app.paths.len()))
-            .into(),
-    );
+    children.push(theme::page_title("Upload"));
+    // The page's feedback lives directly under the title (spec §2) —
+    // one consistent home on every page.
+    if let Some(note) = &app.upload_note {
+        children.push(theme::note_bar(
+            note,
+            context.message(Message::DismissUploadNote),
+        ));
+    }
 
-    if app.paths.is_empty() {
-        children.push(
-            TextBlock::new()
-                .text("Nothing queued yet — add files or folders, or paste a path below.")
-                .opacity(0.6)
+    if app.accounts.is_empty() {
+        // Readiness (spec §4.1): with no account there is nothing to
+        // upload with, so the empty state replaces the whole queue UI
+        // (album and Start stay hidden) until an account exists.
+        children.push(theme::empty_state(
+            Symbol::People,
+            "Connect an account first",
+            "Outh uploads through your Google account. Connect one, then \
+             come back here to add files and start uploading.",
+            Button::new()
+                .style(ButtonStyle::Accent)
+                .on_click(context.callback(|()| {
+                    Message::NavigateTag(Some("accounts".to_string()))
+                }))
+                .content("Go to Accounts")
                 .into(),
-        );
+        ));
+    } else {
+        children.push(queue_section(app, context));
+        children.push(album_area(app, context));
+        children.push(actions_row(app, context));
+        if app.running {
+            children.push(progress_area(app));
+        } else if let Some(summary) = app.run_summary {
+            // The completion panel replaces the progress area once a
+            // run has ended (spec §4.6).
+            children.push(completion_panel(app, context, summary));
+        }
+        if !app.warnings.is_empty() {
+            children.push(warnings_area(app));
+        }
+        if !app.results.is_empty() {
+            children.push(results_area(app));
+        }
+    }
+
+    ScrollViewer::new()
+        .content(
+            Border::new()
+                .padding(Thickness::new(
+                    theme::PAGE_PADDING_X,
+                    theme::PAGE_PADDING_TOP,
+                    theme::PAGE_PADDING_X,
+                    theme::SPACE_XL,
+                ))
+                .content(
+                    StackPanel::new()
+                        .spacing(theme::SPACE_XL)
+                        .max_width(theme::CONTENT_MAX_WIDTH)
+                        .horizontal_alignment(HorizontalAlignment::Left)
+                        .children(children),
+                ),
+        )
+        .into()
+}
+
+/// The queue as a worklist (spec §4.2/§4.3): strong count header, one
+/// card per queued path, the add row, and the drag hint — the whole
+/// section is the page's drop target.
+fn queue_section(app: &OuthApp, context: &mut ViewContext<OuthApp>) -> View {
+    let mut children: Vec<View> = Vec::new();
+    children.push(theme::strong(format!("Queue ({})", app.paths.len())));
+    if app.paths.is_empty() {
+        children.push(theme::caption(
+            "Nothing queued yet — add files or folders below, or drag them here.",
+        ));
     }
     for (index, path) in app.paths.iter().enumerate() {
-        let row_sender = sender.clone();
-        children.push(
-            StackPanel::new()
-                .orientation(Orientation::Horizontal)
-                .spacing(8.0)
-                .children((
-                    TextBlock::new().text(path.display().to_string()),
-                    Button::new()
-                        .is_enabled(!app.running)
-                        .on_click(move || {
-                            _ = row_sender.send(Message::RemovePath(index));
-                        })
-                        .content("Remove"),
-                ))
-                .into(),
-        );
+        children.push(queue_row(app, context, index, path));
     }
+    children.push(add_row(app, context));
+    children.push(theme::caption("or drag files and folders here"));
 
-    children.push(
-        StackPanel::new()
-            .orientation(Orientation::Horizontal)
-            .spacing(8.0)
-            .children((
-                TextBox::new(app.path_draft.clone())
-                    .placeholder_text("Paste a file or folder path, then Add")
-                    .is_enabled(!app.running)
-                    .on_text_changed(context.callback(|value: std::rc::Rc<str>| {
-                        Message::PathDraftChanged(value.to_string())
-                    })),
-                Button::new()
-                    .is_enabled(!app.running)
-                    .on_click(context.callback(|()| Message::AddPathDraft))
-                    .content("Add path"),
-                Button::new()
-                    .is_enabled(!app.running)
-                    .on_click(context.callback(|()| Message::AddFiles))
-                    .content("Add files…"),
-                Button::new()
-                    .is_enabled(!app.running)
-                    .on_click(context.callback(|()| Message::AddFolders))
-                    .content("Add folder…"),
-                Button::new()
-                    .is_enabled(!app.running && !app.paths.is_empty())
-                    .on_click(context.callback(|()| Message::ClearPaths))
-                    .content("Clear"),
-            ))
-            .into(),
-    );
+    let panel = StackPanel::new()
+        .spacing(theme::SPACE_M)
+        .children(children);
+    // Drag-and-drop (I-01), wired exactly as the reactor drag-drop
+    // sample: a storage-items policy + on_drop. Attached only while
+    // idle — mid-run the queue is locked (Remove/Add are disabled too),
+    // so the drop target leaves with them.
+    let mut area = Border::new().content(panel);
+    if !app.running {
+        area = area
+            .drop_policy(
+                DragDropPolicy::new().storage_items(
+                    DragDropAction::new(DragDropOperation::Copy)
+                        .caption("Add to the upload queue"),
+                ),
+            )
+            .on_drop(context.callback(|data: DroppedData| match data {
+                DroppedData::StorageItems(items) => Message::FilesDropped(
+                    items
+                        .into_iter()
+                        .map(|item| PathBuf::from(item.path))
+                        .collect(),
+                ),
+                _ => Message::FilesDropped(Vec::new()),
+            }));
+    }
+    area.into()
+}
 
+/// One queued path as a card row (spec §4.2): kind icon (folder vs
+/// file), file name Strong with the full path as a Caption beneath,
+/// and a Subtle Remove action.
+fn queue_row(
+    app: &OuthApp,
+    context: &mut ViewContext<OuthApp>,
+    index: usize,
+    path: &PathBuf,
+) -> View {
+    let name = file_label(path);
+    let symbol = if path.is_dir() {
+        Symbol::Folder
+    } else {
+        Symbol::Pictures
+    };
+    let row = Grid::new()
+        .columns([GridLength::Auto, GridLength::STAR, GridLength::Auto])
+        .column_spacing(theme::SPACE_M)
+        .children(vec![
+            SymbolIcon::new()
+                .symbol(symbol)
+                .grid_column(0)
+                .vertical_alignment(VerticalAlignment::Center)
+                .into(),
+            StackPanel::new()
+                .grid_column(1)
+                .spacing(theme::SPACE_XS)
+                .children(vec![
+                    theme::strong(name.clone()),
+                    theme::caption(path.display().to_string()),
+                ])
+                .into(),
+            Button::new()
+                .grid_column(2)
+                .vertical_alignment(VerticalAlignment::Center)
+                .style(ButtonStyle::Subtle)
+                .is_enabled(!app.running)
+                .automation_name(format!("Remove {name} from the queue"))
+                .on_click(context.callback(move |()| Message::RemovePath(index)))
+                .content("Remove")
+                .into(),
+        ]);
+    theme::card(vec![row.into()])
+}
+
+/// The add row (spec §4.3): a star column for the path box so the
+/// buttons can never be clipped (I-02) — the star shrinks first.
+/// Enter in the box adds the path (I-05): TextBox has no key events in
+/// this stack, so a wrapping Border routes preview key-down, the
+/// pattern AUDIT_3 verified.
+fn add_row(app: &OuthApp, context: &mut ViewContext<OuthApp>) -> View {
+    let key_sender = context.sender();
+    let enter_to_add = RoutedCallback::new(move |info: KeyEventInfo| {
+        if info.key == VirtualKey::ENTER {
+            let _ = key_sender.send(Message::AddPathDraft);
+            true
+        } else {
+            false
+        }
+    });
+    let text_cell = Border::new()
+        .grid_column(0)
+        .on_preview_key_down(enter_to_add)
+        .content(
+            TextBox::new(app.path_draft.clone())
+                .header("Add by path")
+                .placeholder_text("Paste a file or folder path, then Add")
+                .is_enabled(!app.running)
+                .on_text_changed(context.callback(|value: std::rc::Rc<str>| {
+                    Message::PathDraftChanged(value.to_string())
+                })),
+        );
+    Grid::new()
+        .columns([
+            GridLength::STAR,
+            GridLength::Auto,
+            GridLength::Auto,
+            GridLength::Auto,
+            GridLength::Auto,
+        ])
+        .column_spacing(theme::SPACE_S)
+        .children(vec![
+            text_cell.into(),
+            Button::new()
+                .grid_column(1)
+                .vertical_alignment(VerticalAlignment::Bottom)
+                .is_enabled(!app.running)
+                .on_click(context.callback(|()| Message::AddPathDraft))
+                .content("Add")
+                .into(),
+            Button::new()
+                .grid_column(2)
+                .vertical_alignment(VerticalAlignment::Bottom)
+                .is_enabled(!app.running)
+                .on_click(context.callback(|()| Message::AddFiles))
+                .content("Add files…")
+                .into(),
+            Button::new()
+                .grid_column(3)
+                .vertical_alignment(VerticalAlignment::Bottom)
+                .is_enabled(!app.running)
+                .on_click(context.callback(|()| Message::AddFolders))
+                .content("Add folder…")
+                .into(),
+            Button::new()
+                .grid_column(4)
+                .vertical_alignment(VerticalAlignment::Bottom)
+                .style(ButtonStyle::Subtle)
+                .is_enabled(!app.running && !app.paths.is_empty())
+                // ClearPaths routes to the global confirmation dialog
+                // in main.rs (spec §2) — same as RequestClearQueue.
+                .on_click(context.callback(|()| Message::ClearPaths))
+                .content("Clear")
+                .into(),
+        ])
+        .into()
+}
+
+/// Album choice (spec §4.4). `RadioButtons` has no `is_enabled` in
+/// this stack (schema gap), so while a run is active the area renders
+/// as a static summary line instead of live radios that would silently
+/// not apply (I-17).
+fn album_area(app: &OuthApp, context: &mut ViewContext<OuthApp>) -> View {
+    if app.running {
+        let line = match app.album_mode {
+            AlbumMode::None => {
+                "Album: none — files go straight to your library".to_string()
+            }
+            AlbumMode::Named => format!("Album: {}", app.album_name),
+            AlbumMode::Auto => "Album: one album per source folder".to_string(),
+        };
+        return theme::body(line);
+    }
+    let mut children: Vec<View> = Vec::new();
     children.push(
         RadioButtons::new()
             .items_source(["No album", "Named album", "Auto — one album per folder"])
@@ -249,53 +424,80 @@ pub fn view(app: &OuthApp, context: &mut ViewContext<OuthApp>) -> View {
     if app.album_mode == AlbumMode::Named {
         children.push(
             TextBox::new(app.album_name.clone())
+                .header("Album name")
                 .placeholder_text("Album name (or an existing album key)")
-                .is_enabled(!app.running)
                 .on_text_changed(context.callback(|value: std::rc::Rc<str>| {
                     Message::AlbumNameChanged(value.to_string())
                 }))
                 .into(),
         );
     }
+    StackPanel::new()
+        .spacing(theme::SPACE_S)
+        .children(children)
+        .into()
+}
 
-    children.push(
-        StackPanel::new()
-            .orientation(Orientation::Horizontal)
-            .spacing(8.0)
-            .children((
-                Button::new()
-                    .is_enabled(!app.running && !app.paths.is_empty())
-                    .on_click(context.callback(|()| Message::StartUpload))
-                    .content(if app.running { "Uploading…" } else { "Start upload" }),
-                Button::new()
-                    .is_enabled(app.running)
-                    .on_click(context.callback(|()| Message::CancelUpload))
-                    .content("Cancel"),
-            ))
+/// The account a run would use — the same selection `start_upload`
+/// makes (active account, else the first).
+fn active_email(app: &OuthApp) -> Option<String> {
+    app.accounts
+        .iter()
+        .find(|account| app.active_email.as_deref() == Some(account.email.as_str()))
+        .or_else(|| app.accounts.first())
+        .map(|account| account.email.clone())
+}
+
+/// Start / Cancel actions (spec §4.4): Start is the page's one Accent
+/// button, labelled with the account it will upload as; while running
+/// it gives way to Cancel, and to a disabled "Cancelling…" once a
+/// cancel is in flight.
+fn actions_row(app: &OuthApp, context: &mut ViewContext<OuthApp>) -> View {
+    if app.running {
+        return if app.cancel_requested {
+            Button::new()
+                .is_enabled(false)
+                .content("Cancelling…")
+                .into()
+        } else {
+            Button::new()
+                .on_click(context.callback(|()| Message::CancelUpload))
+                .content("Cancel")
+                .into()
+        };
+    }
+    let mut row: Vec<View> = Vec::new();
+    row.push(
+        Button::new()
+            .style(ButtonStyle::Accent)
+            .is_enabled(!app.paths.is_empty())
+            .on_click(context.callback(|()| Message::StartUpload))
+            .content("Start upload")
             .into(),
     );
-
-    if let Some(note) = &app.upload_note {
-        children.push(theme::note_bar(
-            note,
-            context.message(Message::DismissUploadNote),
-        ));
-    }
-
-    // Aggregate progress: bytes are summed from the per-worker rows (the
-    // same approximation gotohp's GUI uses); file counts come from the
-    // authoritative file_result stream.
-    let uploaded_bytes: u64 = app.workers.iter().map(|row| row.bytes_uploaded).sum();
-    if app.total_bytes > 0 || app.running {
-        children.push(
-            ProgressBar::new()
-                .minimum(0.0)
-                .maximum(app.total_bytes.max(1) as f64)
-                .value(uploaded_bytes.min(app.total_bytes) as f64)
-                .is_indeterminate(app.running && app.total_bytes == 0)
+    if let Some(email) = active_email(app) {
+        row.push(
+            Border::new()
+                .vertical_alignment(VerticalAlignment::Center)
+                .content(theme::caption(format!("Uploading as {email}")))
                 .into(),
         );
     }
+    StackPanel::new()
+        .orientation(Orientation::Horizontal)
+        .spacing(theme::SPACE_M)
+        .children(row)
+        .into()
+}
+
+/// The live run dashboard (spec §4.5). Truthful progress only: the
+/// bar is the finished-files fraction (results are the authoritative
+/// stream) and stays indeterminate while preflight has not produced a
+/// total yet; bytes are the summed per-worker counters, shown as a
+/// text twin, never blended into the bar.
+fn progress_area(app: &OuthApp) -> View {
+    let finished = app.results.len();
+    let uploaded_bytes: u64 = app.workers.iter().map(|row| row.bytes_uploaded).sum();
     let uploaded = app
         .results
         .iter()
@@ -311,93 +513,205 @@ pub fn view(app: &OuthApp, context: &mut ViewContext<OuthApp>) -> View {
         .iter()
         .filter(|row| row.outcome == "Failed")
         .count();
-    children.push(
-        TextBlock::new()
-            .text(format!(
-                "{} file(s) queued · {} uploaded · {} skipped · {} failed",
-                app.total_files.max(app.results.len()),
-                uploaded,
-                skipped,
-                failed
-            ))
-            .into(),
-    );
+
+    let mut children: Vec<View> = Vec::new();
+    let mut bar = ProgressBar::new()
+        .minimum(0.0)
+        .automation_name("Upload progress");
+    if app.total_files > 0 {
+        bar = bar
+            .maximum(app.total_files as f64)
+            .value(finished.min(app.total_files) as f64)
+            .is_indeterminate(false);
+    } else {
+        bar = bar.is_indeterminate(true);
+    }
+    children.push(bar.into());
+
+    let counts = if app.total_files > 0 {
+        let mut line = format!(
+            "{finished} of {} files · {uploaded} uploaded · {skipped} skipped · {failed} failed",
+            app.total_files
+        );
+        if app.total_bytes > 0 {
+            line.push_str(&format!(
+                " · {} of {}",
+                theme::fmt_bytes(uploaded_bytes),
+                theme::fmt_bytes(app.total_bytes)
+            ));
+        }
+        line
+    } else {
+        "Scanning files…".to_string()
+    };
+    children.push(theme::body(counts));
 
     for row in &app.workers {
         let mut line = format!(
-            "Worker {} — {} — {}",
+            "Worker {} · {} · {}",
             row.worker + 1,
             row.stage,
             row.file
         );
         if row.bytes_total > 0 {
             line.push_str(&format!(
-                " ({} / {} bytes)",
-                row.bytes_uploaded, row.bytes_total
+                " · {} / {}",
+                theme::fmt_bytes(row.bytes_uploaded),
+                theme::fmt_bytes(row.bytes_total)
             ));
         }
+        // Core currently reports attempt 0 until its first retry, so
+        // an attempt is shown only when it is real (> 1) — never
+        // fabricated (§4.5).
         if row.attempt > 1 {
             line.push_str(&format!(" · attempt {}", row.attempt));
         }
-        children.push(TextBlock::new().text(line).opacity(0.8).into());
+        children.push(theme::secondary(line));
     }
 
     if let Some(status) = &app.album_status {
-        children.push(TextBlock::new().text(status.clone()).into());
+        children.push(theme::caption(status.clone()));
     }
 
-    if !app.warnings.is_empty() {
-        children.push(TextBlock::new().text("Warnings").font_size(16.0).into());
-        for warning in app.warnings.iter().rev().take(10) {
-            children.push(
-                TextBlock::new()
-                    .text(warning.clone())
-                    .text_wrapping(TextWrapping::Wrap)
-                    .opacity(0.8)
-                    .into(),
-            );
-        }
-    }
+    StackPanel::new()
+        .spacing(theme::SPACE_S)
+        .children(children)
+        .into()
+}
 
-    if !app.results.is_empty() {
-        children.push(
-            TextBlock::new()
-                .text(format!("Results ({})", app.results.len()))
-                .font_size(16.0)
+/// The completion panel (spec §4.6): a card rendered from the run's
+/// terminal summary once it has ended — headline, counts, album
+/// outcome, and the three follow-up actions.
+fn completion_panel(
+    app: &OuthApp,
+    context: &mut ViewContext<OuthApp>,
+    summary: RunEnded,
+) -> View {
+    let mut children: Vec<View> = Vec::new();
+    children.push(theme::section_title(if summary.cancelled {
+        "Run cancelled"
+    } else {
+        "Run complete"
+    }));
+    children.push(theme::body(format!(
+        "{} uploaded · {} skipped · {} failed",
+        summary.uploaded, summary.skipped, summary.failed
+    )));
+    if let Some(status) = &app.album_status {
+        children.push(theme::secondary(status.clone()));
+    }
+    let mut actions: Vec<View> = Vec::new();
+    if summary.failed > 0 {
+        actions.push(
+            Button::new()
+                .style(ButtonStyle::Accent)
+                .on_click(context.callback(|()| Message::RetryFailed))
+                .content(format!("Retry failed ({})", summary.failed))
                 .into(),
         );
-        if app.results.len() > 200 {
-            children.push(
-                TextBlock::new()
-                    .text(format!(
-                        "Showing the latest 200 of {} results.",
-                        app.results.len()
-                    ))
-                    .opacity(0.6)
-                    .into(),
-            );
-        }
-        // Skipped counts as success (the file is already in the library),
-        // mirroring gotohp's model.
-        for row in app.results.iter().rev().take(200) {
-            let mut line = format!("{} — {}", row.file, row.outcome);
-            if let Some(message) = &row.message {
-                line.push_str(&format!(": {message}"));
-            }
-            children.push(
-                TextBlock::new()
-                    .text(line)
-                    .text_wrapping(TextWrapping::Wrap)
-                    .into(),
-            );
-        }
     }
+    actions.push(
+        Button::new()
+            .style(ButtonStyle::Subtle)
+            .on_click(context.callback(|()| Message::RemoveCompletedFromQueue))
+            .content("Remove completed from queue")
+            .into(),
+    );
+    actions.push(
+        HyperlinkButton::new()
+            .on_click(context.callback(|()| Message::OpenGooglePhotos))
+            .content("Open Google Photos")
+            .into(),
+    );
+    children.push(
+        StackPanel::new()
+            .orientation(Orientation::Horizontal)
+            .spacing(theme::SPACE_S)
+            .children(actions)
+            .into(),
+    );
+    theme::card(children)
+}
 
-    ScrollViewer::new()
-        .content(
-            Border::new()
-                .padding(Thickness::new(24.0, 24.0, 24.0, 24.0))
-                .content(StackPanel::new().spacing(10.0).children(children)),
-        )
+/// Preflight warnings (spec §4.7): ONE Warning summary bar for the
+/// whole set — a bar per warning would flood the page — with the full
+/// list in a collapsed Expander.
+fn warnings_area(app: &OuthApp) -> View {
+    let count = app.warnings.len();
+    let mut children: Vec<View> = Vec::new();
+    children.push(theme::info_bar(
+        NoteSeverity::Warning,
+        None,
+        &format!(
+            "{count} preflight warning{}",
+            if count == 1 { "" } else { "s" }
+        ),
+        None,
+    ));
+    children.push(
+        Expander::new()
+            .header(theme::body("Warning details"))
+            .content(
+                StackPanel::new().spacing(theme::SPACE_XS).children(
+                    app.warnings
+                        .iter()
+                        .map(|warning| theme::caption(warning.clone()))
+                        .collect::<Vec<View>>(),
+                ),
+            )
+            .into(),
+    );
+    StackPanel::new()
+        .spacing(theme::SPACE_S)
+        .children(children)
+        .into()
+}
+
+/// Finished files (spec §4.7): name Strong + outcome Caption; a
+/// failed row's outcome word carries the SystemCritical brush (the
+/// word itself stays, so meaning is never color-only). Latest 200,
+/// with the cap stated.
+fn results_area(app: &OuthApp) -> View {
+    let mut children: Vec<View> = Vec::new();
+    children.push(theme::strong(format!("Results ({})", app.results.len())));
+    if app.results.len() > 200 {
+        children.push(theme::caption(format!(
+            "Showing the latest 200 of {} results.",
+            app.results.len()
+        )));
+    }
+    // Skipped counts as success (the file is already in the library),
+    // mirroring gotohp's model.
+    for row in app.results.iter().rev().take(200) {
+        let outcome: View = if row.outcome == "Failed" {
+            TextBlock::new()
+                .text(row.outcome.clone())
+                .font_size(theme::TYPE_CAPTION)
+                .font_weight(FontWeight::NORMAL)
+                .foreground(ThemeBrush::SystemCritical)
+                .into()
+        } else {
+            theme::caption(row.outcome.clone())
+        };
+        let mut lines: Vec<View> = vec![
+            StackPanel::new()
+                .orientation(Orientation::Horizontal)
+                .spacing(theme::SPACE_S)
+                .children(vec![theme::strong(row.file.clone()), outcome])
+                .into(),
+        ];
+        if let Some(message) = &row.message {
+            lines.push(theme::caption(message.clone()));
+        }
+        children.push(
+            StackPanel::new()
+                .spacing(theme::SPACE_XS)
+                .children(lines)
+                .into(),
+        );
+    }
+    StackPanel::new()
+        .spacing(theme::SPACE_S)
+        .children(children)
         .into()
 }
