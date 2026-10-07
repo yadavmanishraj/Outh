@@ -1,0 +1,49 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# On GitHub-hosted windows runners the standard rustup proxies work, so no
+# RUSTC override is needed (the override in docs/BUILDING.md is a quirk of
+# one local laptop's broken ~/.cargo/bin shims — do not copy it here).
+jobs:
+  build-and-test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable, MSVC)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Test core library
+        run: cargo test -p outh-core
+
+      # Builds the reactor app too: its build.rs stages the Windows App
+      # Runtime from NuGet for the self-contained layout (first run needs
+      # network, which runners have).
+      - name: Build release
+        run: cargo build --release
+
+  fmt-and-clippy:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable, MSVC, with rustfmt + clippy)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+          components: rustfmt, clippy
+
+      - name: rustfmt
+        run: cargo fmt --all --check
+
+      # Scoped to outh-core: fast, and the library is where the protocol
+      # code lives. Warnings are not denied while the first-wave branches
+      # are still landing; tighten to -D warnings once main settles.
+      - name: clippy (outh-core)
+        run: cargo clippy -p outh-core --all-targets
