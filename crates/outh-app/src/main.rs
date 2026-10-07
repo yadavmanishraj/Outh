@@ -194,6 +194,7 @@ pub enum Message {
     AddFolders,
     PathsPicked(Vec<PathBuf>),
     FilesDropped(Vec<PathBuf>),
+    DragHover(bool),
     PickerFailed(String),
     RemovePath(usize),
     ClearPaths,
@@ -270,6 +271,8 @@ pub struct OuthApp {
     // Upload section state
     pub paths: Vec<PathBuf>,
     pub path_draft: String,
+    /// True while a file drag hovers the drop zone (upload.rs).
+    pub drag_hover: bool,
     pub album_mode: AlbumMode,
     pub album_name: String,
     pub running: bool,
@@ -406,6 +409,7 @@ impl Component for OuthApp {
             paths: Vec::new(),
             path_draft: String::new(),
             album_mode: AlbumMode::None,
+            drag_hover: false,
             album_name: String::new(),
             running: false,
             cancel_requested: false,
@@ -476,7 +480,9 @@ impl Component for OuthApp {
                     }
                 }
             }
+            Message::DragHover(hovering) => self.drag_hover = hovering,
             Message::FilesDropped(paths) => {
+                self.drag_hover = false;
                 // Dropped paths merge exactly like picker results.
                 for path in paths {
                     if !self.paths.contains(&path) {

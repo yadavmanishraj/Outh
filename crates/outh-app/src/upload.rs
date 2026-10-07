@@ -239,55 +239,134 @@ pub fn view(app: &OuthApp, context: &mut ViewContext<OuthApp>) -> View {
         .into()
 }
 
-/// The queue as a worklist (spec §4.2/§4.3): strong count header, one
-/// card per queued path, the add row, and the drag hint — the whole
-/// section is the page's drop target.
+/// The queue as a worklist (spec §4.2/§4.3): strong count header, the
+/// add row, the designed drop zone, and one card per queued path.
 fn queue_section(app: &OuthApp, context: &mut ViewContext<OuthApp>) -> View {
     let mut children: Vec<View> = Vec::new();
     children.push(theme::strong(format!("Queue ({})", app.paths.len())));
     // The add row comes FIRST in construction order (= tab order, R-15)
     // and stays visible above a long queue; the rows follow it.
     children.push(add_row(app, context));
-    if app.paths.is_empty() {
-        children.push(theme::caption(
-            "Nothing queued yet — add files or folders above, or drag them here.",
-        ));
-    } else {
-        // The standalone drag hint only when the empty-state caption
-        // isn't already saying it (R-13).
-        children.push(theme::caption("or drag files and folders here"));
-        for (index, path) in app.paths.iter().enumerate() {
-            children.push(queue_row(app, context, index, path));
-        }
+    if !app.running {
+        // The designed drop target: hero size for the empty queue, a
+        // compact strip once files are queued. It is the ONLY drop
+        // target on the page, and it leaves while a run locks the
+        // queue.
+        children.push(drop_zone(app, context, app.paths.is_empty()));
+    }
+    for (index, path) in app.paths.iter().enumerate() {
+        children.push(queue_row(app, context, index, path));
     }
 
-    let panel = StackPanel::new()
+    StackPanel::new()
         .spacing(theme::SPACE_M)
-        .children(children);
-    // Drag-and-drop (I-01), wired exactly as the reactor drag-drop
-    // sample: a storage-items policy + on_drop. Attached only while
-    // idle — mid-run the queue is locked (Remove/Add are disabled too),
-    // so the drop target leaves with them.
-    let mut area = Border::new().content(panel);
-    if !app.running {
-        area = area
-            .drop_policy(
-                DragDropPolicy::new().storage_items(
-                    DragDropAction::new(DragDropOperation::Copy)
-                        .caption("Add to the upload queue"),
-                ),
-            )
-            .on_drop(context.callback(|data: DroppedData| match data {
-                DroppedData::StorageItems(items) => Message::FilesDropped(
-                    items
-                        .into_iter()
-                        .map(|item| PathBuf::from(item.path))
-                        .collect(),
-                ),
-                _ => Message::FilesDropped(Vec::new()),
-            }));
-    }
-    area.into()
+        .children(children)
+        .into()
+}
+
+/// The page's one designed drop target: a card-stroke frame with an
+/// upload glyph and a label, built exactly as the reactor drag-drop
+/// sample builds its target — a REAL background brush (transparent
+/// while idle) so the whole frame is hit-testable, brightening to the
+/// card fill with an Accent frame while a drag hovers. (The previous
+/// design attached the policy to an invisible page-sized wrapper with
+/// no background at all, so a drop over empty page area never even
+/// registered as a drag-over — verified by automated Explorer drags
+/// on the laptop, 2026-10-07.)
+fn drop_zone(app: &OuthApp, context: &mut ViewContext<OuthApp>, hero: bool) -> View {
+    let hovering = app.drag_hover;
+    let headline = if hovering {
+        "Release to add to the queue"
+    } else if hero {
+        "Drag files and folders here"
+    } else {
+        "Drag more files and folders here"
+    };
+    let glyph = SymbolIcon::new()
+        .symbol(Symbol::Upload)
+        .width(28.0)
+        .height(28.0)
+        .opacity(if hovering { 1.0 } else { theme::DIM_TERTIARY })
+        .into();
+    let label = TextBlock::new()
+        .text(headline)
+        .font_size(theme::TYPE_BODY)
+        .font_weight(FontWeight::SEMI_BOLD)
+        .into();
+    let content: View = if hero {
+        let mut stack: Vec<View> = vec![
+            SymbolIcon::new()
+                .symbol(Symbol::Upload)
+                .width(28.0)
+                .height(28.0)
+                .opacity(if hovering { 1.0 } else { theme::DIM_TERTIARY })
+                .horizontal_alignment(HorizontalAlignment::Center)
+                .into(),
+            TextBlock::new()
+                .text(headline)
+                .font_size(theme::TYPE_BODY)
+                .font_weight(FontWeight::SEMI_BOLD)
+                .horizontal_alignment(HorizontalAlignment::Center)
+                .into(),
+        ];
+        stack.push(
+            TextBlock::new()
+                .text("Nothing uploads until you press Start upload.")
+                .font_size(theme::TYPE_CAPTION)
+                .opacity(theme::DIM_SECONDARY)
+                .horizontal_alignment(HorizontalAlignment::Center)
+                .into(),
+        );
+        StackPanel::new()
+            .spacing(theme::SPACE_S)
+            .children(stack)
+            .into()
+    } else {
+        StackPanel::new()
+            .orientation(Orientation::Horizontal)
+            .spacing(theme::SPACE_M)
+            .horizontal_alignment(HorizontalAlignment::Center)
+            .children(vec![glyph, label])
+            .into()
+    };
+    Border::new()
+        .background(if hovering {
+            Brush::from(ThemeBrush::CardBackground)
+        } else {
+            Brush::from(Color::transparent())
+        })
+        .border_brush(if hovering {
+            Brush::from(ThemeBrush::Accent)
+        } else {
+            Brush::from(ThemeBrush::CardStroke)
+        })
+        .border_thickness(Thickness::uniform(if hovering { 2.0 } else { 1.0 }))
+        .corner_radius(CornerRadius::uniform(8.0))
+        .padding(Thickness::uniform(if hero {
+            theme::SPACE_XL
+        } else {
+            theme::SPACE_M
+        }))
+        .drop_policy(
+            DragDropPolicy::new().storage_items(
+                DragDropAction::new(DragDropOperation::Copy)
+                    .caption("Add to the upload queue"),
+            ),
+        )
+        .on_drag_enter(context.callback(|_kind: DragKind| Message::DragHover(true)))
+        .on_drag_over(context.callback(|_kind: DragKind| Message::DragHover(true)))
+        .on_drag_leave(context.message(Message::DragHover(false)))
+        .on_drop(context.callback(|data: DroppedData| match data {
+            DroppedData::StorageItems(items) => Message::FilesDropped(
+                items
+                    .into_iter()
+                    .map(|item| PathBuf::from(item.path))
+                    .collect(),
+            ),
+            _ => Message::FilesDropped(Vec::new()),
+        }))
+        .content(content)
+        .into()
 }
 
 /// One queued path as a card row (spec §4.2): kind icon (folder vs
