@@ -173,88 +173,174 @@ pub fn start_upload(app: &mut OuthApp, context: &ComponentContext<OuthApp>) {
 }
 
 pub fn view(app: &OuthApp, context: &mut ViewContext<OuthApp>) -> View {
-    let mut children: Vec<View> = Vec::new();
-
-    children.push(theme::page_title("Upload"));
+    // Pinned chrome (UPLOAD_DESIGN_V2 P8): the page is a Grid whose
+    // header and footer never scroll — only the queue region does.
+    // Rows: 0 header (title + note), 1 drop strip (compact zone,
+    // present once the queue is non-empty), 2 queue (STAR, scrolls),
+    // 3 footer (album card + Start / progress / completion panel).
+    let mut header: Vec<View> = vec![theme::page_title("Upload")];
     // The page's feedback lives directly under the title (spec §2) —
     // one consistent home on every page.
     if let Some(note) = &app.upload_note {
-        children.push(theme::note_bar(
+        header.push(theme::note_bar(
             note,
             context.message(Message::DismissUploadNote),
         ));
     }
+    let header_view: View = Border::new()
+        .grid_row(0)
+        .padding(Thickness::new(
+            theme::PAGE_PADDING_X,
+            theme::PAGE_PADDING_TOP,
+            theme::PAGE_PADDING_X,
+            theme::SPACE_M,
+        ))
+        .content(
+            StackPanel::new()
+                .spacing(theme::SPACE_S)
+                .children(header),
+        )
+        .into();
+
+    let rows = [
+        GridLength::Auto,
+        GridLength::Auto,
+        GridLength::STAR,
+        GridLength::Auto,
+    ];
 
     if app.accounts.is_empty() {
         // Readiness (spec §4.1): with no account there is nothing to
         // upload with, so the empty state replaces the whole queue UI
         // (album and Start stay hidden) until an account exists.
-        children.push(theme::empty_state(
-            Symbol::People,
-            "Connect an account first",
-            "Outh uploads through your Google account. Connect one, then \
-             come back here to add files and start uploading.",
-            Button::new()
-                .style(ButtonStyle::Accent)
-                .on_click(context.callback(|()| {
-                    Message::NavigateTag(Some("accounts".to_string()))
-                }))
-                .content("Go to Accounts")
-                .into(),
-        ));
-    } else {
-        children.push(queue_section(app, context));
-        children.push(album_area(app, context));
-        children.push(actions_row(app, context));
-        if app.running {
-            children.push(progress_area(app));
-        } else if let Some(summary) = app.run_summary {
-            // The completion panel replaces the progress area once a
-            // run has ended (spec §4.6).
-            children.push(completion_panel(app, context, summary));
-        }
-        if !app.warnings.is_empty() {
-            children.push(warnings_area(app));
-        }
-        if !app.results.is_empty() {
-            children.push(results_area(app));
-        }
+        let middle: View = ScrollViewer::new()
+            .grid_row(2)
+            .content(
+                Border::new()
+                    .padding(Thickness::new(
+                        theme::PAGE_PADDING_X,
+                        0.0,
+                        theme::PAGE_PADDING_X,
+                        theme::SPACE_XL,
+                    ))
+                    .content(theme::empty_state(
+                        Symbol::People,
+                        "Connect an account first",
+                        "Outh uploads through your Google account. Connect one, then \
+                         come back here to add files and start uploading.",
+                        Button::new()
+                            .style(ButtonStyle::Accent)
+                            .on_click(context.callback(|()| {
+                                Message::NavigateTag(Some("accounts".to_string()))
+                            }))
+                            .content("Go to Accounts")
+                            .into(),
+                    )),
+            )
+            .into();
+        return Grid::new()
+            .rows(rows)
+            .children(vec![header_view, middle])
+            .into();
     }
 
-    ScrollViewer::new()
-        .content(
+    let mut grid_children: Vec<View> = vec![header_view];
+
+    // Drop strip: the compact zone, pinned above the queue once the
+    // queue is non-empty so the drop target is always on screen (the
+    // hero zone lives in the scroll region while the queue is empty).
+    // It leaves while a run locks the queue, as before.
+    if !app.paths.is_empty() && !app.running {
+        grid_children.push(
             Border::new()
+                .grid_row(1)
                 .padding(Thickness::new(
                     theme::PAGE_PADDING_X,
-                    theme::PAGE_PADDING_TOP,
+                    0.0,
                     theme::PAGE_PADDING_X,
-                    theme::SPACE_XL,
+                    theme::SPACE_M,
                 ))
-                .content(
-                    StackPanel::new()
-                        .spacing(theme::SPACE_XL)
-                        .children(children),
-                ),
-        )
+                .content(drop_zone(app, context, false))
+                .into(),
+        );
+    }
+
+    // The only scrolling region: queue header, hero zone (empty
+    // queue), queue rows, then preflight warnings and live results.
+    grid_children.push(
+        ScrollViewer::new()
+            .grid_row(2)
+            .content(
+                Border::new()
+                    .padding(Thickness::new(
+                        theme::PAGE_PADDING_X,
+                        0.0,
+                        theme::PAGE_PADDING_X,
+                        theme::SPACE_XL,
+                    ))
+                    .content(queue_scroll_content(app, context)),
+            )
+            .into(),
+    );
+
+    // Footer (pinned): the commitment point (P5/P6) — album options
+    // card + Start while idle; the album summary + progress while
+    // running; the completion panel when a run has ended.
+    let footer_content: View = if app.running {
+        StackPanel::new()
+            .spacing(theme::SPACE_S)
+            .children(vec![album_area(app, context), progress_area(app)])
+            .into()
+    } else if let Some(summary) = app.run_summary {
+        completion_panel(app, context, summary)
+    } else {
+        StackPanel::new()
+            .spacing(theme::SPACE_M)
+            .children(vec![
+                theme::card(vec![album_area(app, context)]),
+                actions_row(app, context),
+            ])
+            .into()
+    };
+    grid_children.push(
+        Border::new()
+            .grid_row(3)
+            .border_brush(ThemeBrush::CardStroke)
+            .border_thickness(Thickness::new(0.0, 1.0, 0.0, 0.0))
+            .padding(Thickness::new(
+                theme::PAGE_PADDING_X,
+                theme::SPACE_M,
+                theme::PAGE_PADDING_X,
+                theme::SPACE_L,
+            ))
+            .content(footer_content)
+            .into(),
+    );
+
+    Grid::new()
+        .rows(rows)
+        .children(grid_children)
         .into()
 }
 
-/// The queue as a worklist (spec §4.2/§4.3): strong count header, the
-/// add row, the designed drop zone, and one card per queued path.
-fn queue_section(app: &OuthApp, context: &mut ViewContext<OuthApp>) -> View {
+/// The scrolling region's content: queue header, the hero drop zone
+/// while the queue is empty, one card per queued path, then the
+/// preflight warnings and the live/finished results.
+fn queue_scroll_content(app: &OuthApp, context: &mut ViewContext<OuthApp>) -> View {
     let mut children: Vec<View> = Vec::new();
     children.push(queue_header(app, context));
-    if !app.running {
-        // The designed drop target: hero size for the empty queue, a
-        // compact strip once files are queued. It is the ONLY drop
-        // target on the page, and it leaves while a run locks the
-        // queue.
-        children.push(drop_zone(app, context, app.paths.is_empty()));
+    if app.paths.is_empty() && !app.running {
+        children.push(drop_zone(app, context, true));
     }
     for (index, path) in app.paths.iter().enumerate() {
         children.push(queue_row(app, context, index, path));
     }
-
+    if !app.warnings.is_empty() {
+        children.push(warnings_area(app));
+    }
+    if !app.results.is_empty() {
+        children.push(results_area(app));
+    }
     StackPanel::new()
         .spacing(theme::SPACE_M)
         .children(children)
@@ -670,27 +756,43 @@ fn completion_panel(
     } else {
         "Run complete"
     }));
-    children.push(theme::body(format!(
-        "{} uploaded · {} skipped · {} failed",
-        summary.uploaded, summary.skipped, summary.failed
-    )));
-    // Files the run never attempted (e.g. everything after a cancel) —
-    // the summary knows the denominator even when results don't (R-08).
+    // Reconciled counts (UPLOAD_DESIGN_V2 P6): the buckets always sum
+    // to the run's total. The summary aggregates both skip kinds, so
+    // "already in library" and "unsupported" are split back out of the
+    // result stream; any residual the stream can't account for shows
+    // as a plain "skipped" rather than being silently absorbed, and
+    // files never attempted (e.g. everything after a cancel, R-08)
+    // close the sum.
+    let already = app
+        .results
+        .iter()
+        .filter(|row| row.outcome == "Skipped — already in library")
+        .count();
+    let unsupported = app
+        .results
+        .iter()
+        .filter(|row| row.outcome == "Skipped — unsupported file")
+        .count();
+    let other_skipped = summary.skipped.saturating_sub(already + unsupported);
     let attempted = summary.uploaded + summary.skipped + summary.failed;
-    if summary.total_items > attempted {
-        children.push(theme::secondary(format!(
-            "{} file{} not attempted",
-            summary.total_items - attempted,
-            if summary.total_items - attempted == 1 {
-                ""
-            } else {
-                "s"
-            }
-        )));
+    let not_attempted = summary.total_items.saturating_sub(attempted);
+    let mut counts = format!(
+        "{} files — {} uploaded · {} already in library · {} skipped as unsupported · {} failed",
+        summary.total_items, summary.uploaded, already, unsupported, summary.failed
+    );
+    if other_skipped > 0 {
+        counts.push_str(&format!(" · {other_skipped} skipped"));
     }
+    if not_attempted > 0 {
+        counts.push_str(&format!(" · {not_attempted} not attempted"));
+    }
+    children.push(theme::body(counts));
     if let Some(status) = &app.album_status {
         children.push(theme::secondary(status.clone()));
     }
+    // Exactly one primary action (P6): retrying the failures when
+    // there are any; otherwise opening the library the files landed
+    // in. Remove-completed stays a quiet secondary either way.
     let mut actions: Vec<View> = Vec::new();
     if summary.failed > 0 {
         actions.push(
@@ -700,20 +802,44 @@ fn completion_panel(
                 .content(format!("Retry failed ({})", summary.failed))
                 .into(),
         );
+        actions.push(
+            Button::new()
+                .style(ButtonStyle::Subtle)
+                .on_click(context.callback(|()| Message::RemoveCompletedFromQueue))
+                .content("Remove completed from queue")
+                .into(),
+        );
+        actions.push(
+            HyperlinkButton::new()
+                .on_click(context.callback(|()| Message::OpenGooglePhotos))
+                .content("Open Google Photos")
+                .into(),
+        );
+    } else {
+        actions.push(
+            Button::new()
+                .style(ButtonStyle::Subtle)
+                .on_click(context.callback(|()| Message::RemoveCompletedFromQueue))
+                .content("Remove completed from queue")
+                .into(),
+        );
+        if summary.uploaded + already > 0 {
+            actions.push(
+                Button::new()
+                    .style(ButtonStyle::Accent)
+                    .on_click(context.callback(|()| Message::OpenGooglePhotos))
+                    .content("Open Google Photos")
+                    .into(),
+            );
+        } else {
+            actions.push(
+                HyperlinkButton::new()
+                    .on_click(context.callback(|()| Message::OpenGooglePhotos))
+                    .content("Open Google Photos")
+                    .into(),
+            );
+        }
     }
-    actions.push(
-        Button::new()
-            .style(ButtonStyle::Subtle)
-            .on_click(context.callback(|()| Message::RemoveCompletedFromQueue))
-            .content("Remove completed from queue")
-            .into(),
-    );
-    actions.push(
-        HyperlinkButton::new()
-            .on_click(context.callback(|()| Message::OpenGooglePhotos))
-            .content("Open Google Photos")
-            .into(),
-    );
     children.push(
         StackPanel::new()
             .orientation(Orientation::Horizontal)
