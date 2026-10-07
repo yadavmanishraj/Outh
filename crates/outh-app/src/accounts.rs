@@ -13,7 +13,8 @@
 
 use windows_reactor::*;
 
-use crate::{Message, OuthApp};
+use crate::theme;
+use crate::{Message, Note, OuthApp};
 
 /// Embedded Setup page, opened in the system browser.
 pub const EMBEDDED_SETUP_URL: &str = "https://accounts.google.com/EmbeddedSetup";
@@ -26,11 +27,11 @@ pub fn connect_account(app: &mut OuthApp, context: &ComponentContext<OuthApp>) {
     }
     let token = app.oauth_token.trim().to_string();
     if token.is_empty() {
-        app.account_note = Some("Paste the oauth_token cookie value first.".to_string());
+        app.account_note = Some(Note::warning("Paste the oauth_token cookie value first."));
         return;
     }
     app.auth_busy = true;
-    app.account_note = Some("Contacting Google…".to_string());
+    app.account_note = Some(Note::info("Contacting Google…"));
     let proxy = app.prefs.proxy.clone();
     _ = context.spawn_background(move |_| {
         let auth = outh_core::auth::EmbeddedSetupAuth::new(&proxy);
@@ -199,12 +200,10 @@ pub fn view(app: &OuthApp, context: &mut ViewContext<OuthApp>) -> View {
     );
 
     if let Some(note) = &app.account_note {
-        children.push(
-            TextBlock::new()
-                .text(note.clone())
-                .text_wrapping(TextWrapping::Wrap)
-                .into(),
-        );
+        children.push(theme::note_bar(
+            note,
+            context.message(Message::DismissAccountNote),
+        ));
     }
 
     ScrollViewer::new()

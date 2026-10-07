@@ -15,6 +15,7 @@ mod protector;
 mod reporter;
 mod settings;
 mod store;
+mod theme;
 mod upload;
 
 use std::path::PathBuf;
@@ -31,6 +32,88 @@ pub enum Section {
     Upload,
     Accounts,
     Settings,
+}
+
+/// Severity for a user-facing note (spec §2). Every page renders its
+/// note through `theme::info_bar`, so severity is always visible —
+/// replacing the old undifferentiated `Option<String>` notes (F-38).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NoteSeverity {
+    Info,
+    Success,
+    Warning,
+    Error,
+}
+
+/// A page-level feedback message with a severity.
+#[derive(Clone, Debug)]
+pub struct Note {
+    pub severity: NoteSeverity,
+    pub text: String,
+}
+
+impl Note {
+    pub fn info(text: impl Into<String>) -> Note {
+        Note {
+            severity: NoteSeverity::Info,
+            text: text.into(),
+        }
+    }
+
+    pub fn success(text: impl Into<String>) -> Note {
+        Note {
+            severity: NoteSeverity::Success,
+            text: text.into(),
+        }
+    }
+
+    pub fn warning(text: impl Into<String>) -> Note {
+        Note {
+            severity: NoteSeverity::Warning,
+            text: text.into(),
+        }
+    }
+
+    pub fn error(text: impl Into<String>) -> Note {
+        Note {
+            severity: NoteSeverity::Error,
+            text: text.into(),
+        }
+    }
+}
+
+/// A pending global confirmation (spec §2). Exactly one declarative
+/// ContentDialog in the root view renders this; the destructive action
+/// runs only when the dialog resolves with Primary (`ConfirmResolved`).
+#[derive(Clone, Debug)]
+pub enum Confirm {
+    RemoveAccount(String),
+    ClearQueue,
+    DeleteOriginals,
+}
+
+/// Terminal counts of one upload run, converted from core's `RunSummary`
+/// at the upload-thread boundary (spec §3.5). Stored on the app as
+/// `run_summary` so the completion panel can render from it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RunEnded {
+    pub total_items: usize,
+    pub uploaded: usize,
+    pub skipped: usize,
+    pub failed: usize,
+    pub cancelled: bool,
+}
+
+impl From<outh_core::upload::RunSummary> for RunEnded {
+    fn from(summary: outh_core::upload::RunSummary) -> Self {
+        RunEnded {
+            total_items: summary.total_items,
+            uploaded: summary.uploaded,
+            skipped: summary.skipped,
+            failed: summary.failed,
+            cancelled: summary.cancelled,
+        }
+    }
 }
 
 /// Album choice in the Upload section (session-only, as in Go).
@@ -96,12 +179,21 @@ pub enum Message {
     // Navigation (payload: the NavigationView item tag)
     NavigateTag(Option<String>),
 
+    // Feedback & confirmations (spec §2)
+    DismissUploadNote,
+    DismissAccountNote,
+    DismissSettingsNote,
+    RequestRemoveAccount(String),
+    RequestClearQueue,
+    ConfirmResolved(bool),
+
     // Upload section
     PathDraftChanged(String),
     AddPathDraft,
     AddFiles,
     AddFolders,
     PathsPicked(Vec<PathBuf>),
+    FilesDropped(Vec<PathBuf>),
     PickerFailed(String),
     RemovePath(usize),
     ClearPaths,
@@ -109,6 +201,9 @@ pub enum Message {
     AlbumNameChanged(String),
     StartUpload,
     CancelUpload,
+    RetryFailed,
+    RemoveCompletedFromQueue,
+    OpenGooglePhotos,
 
     // Upload run — sent by the reporter bridge / upload thread
     UploadStarted(usize),
@@ -121,7 +216,7 @@ pub enum Message {
     UploadAlbumProgress(AlbumStatus),
     UploadAlbumComplete(AlbumStatus),
     UploadAlbumError(String, String),
-    UploadRunEnded(String),
+    UploadRunEnded(RunEnded),
 
     // Accounts section
     OAuthTokenChanged(String),
@@ -150,9 +245,12 @@ pub struct WorkerRow {
     pub attempt: u32,
 }
 
-/// One finished file, for the results list.
+/// One finished file, for the results list. `file` is the display label
+/// (name only); `path` is the full path, kept so Retry failed can
+/// re-queue exactly this file (spec §3.6).
 pub struct ResultRow {
     pub file: String,
+    pub path: PathBuf,
     pub outcome: String,
     pub message: Option<String>,
 }
@@ -182,16 +280,21 @@ pub struct OuthApp {
     pub results: Vec<ResultRow>,
     pub warnings: Vec<String>,
     pub album_status: Option<String>,
-    pub upload_note: Option<String>,
+    pub upload_note: Option<Note>,
+    /// Terminal summary of the last finished run (completion panel data).
+    pub run_summary: Option<RunEnded>,
 
     // Accounts section state
     pub oauth_token: String,
     pub raw_credential: String,
     pub auth_busy: bool,
-    pub account_note: Option<String>,
+    pub account_note: Option<Note>,
 
     // Settings section state
-    pub settings_note: Option<String>,
+    pub settings_note: Option<Note>,
+
+    // Global confirmation awaiting the root ContentDialog (spec §2)
+    pub confirm: Option<Confirm>,
 }
 
 impl OuthApp {
@@ -211,7 +314,8 @@ impl OuthApp {
             match store::save_preferences(service, &self.prefs) {
                 Ok(()) => self.settings_note = None,
                 Err(error) => {
-                    self.settings_note = Some(format!("Could not save settings: {error}"))
+                    self.settings_note =
+                        Some(Note::error(format!("Could not save settings: {error}")));
                 }
             }
         }
@@ -226,15 +330,41 @@ impl OuthApp {
                     // gotohp (the GUI selects the account it just added).
                     let _ = store::set_active(service, &email);
                     self.refresh_from_store();
-                    self.account_note = Some(format!("Added account {email}."));
+                    self.account_note = Some(Note::success(format!("Added account {email}.")));
                 }
                 Err(error) => {
-                    self.account_note = Some(format!("Could not save the account: {error}"));
+                    self.account_note =
+                        Some(Note::error(format!("Could not save the account: {error}")));
                 }
             },
             None => {
-                self.account_note =
-                    Some("Config could not be loaded, so the account was not saved.".to_string());
+                self.account_note = Some(Note::error(
+                    "Config could not be loaded, so the account was not saved.",
+                ));
+            }
+        }
+    }
+
+    /// Applies an account removal (the destructive half of the
+    /// remove-account confirmation, spec §2). Only called from
+    /// `ConfirmResolved(true)` or the legacy `RemoveAccount` arm.
+    fn remove_account_now(&mut self, email: &str) {
+        match &mut self.store {
+            Some(service) => match store::remove_account(service, email) {
+                Ok(()) => {
+                    self.refresh_from_store();
+                    self.account_note =
+                        Some(Note::success(format!("Removed account {email}.")));
+                }
+                Err(error) => {
+                    self.account_note =
+                        Some(Note::error(format!("Could not remove account: {error}")));
+                }
+            },
+            None => {
+                self.account_note = Some(Note::error(
+                    "Config could not be loaded; accounts are unavailable.",
+                ));
             }
         }
     }
@@ -267,11 +397,13 @@ impl Component for OuthApp {
             warnings: Vec::new(),
             album_status: None,
             upload_note: None,
+            run_summary: None,
             oauth_token: String::new(),
             raw_credential: String::new(),
             auth_busy: false,
             account_note: None,
             settings_note: None,
+            confirm: None,
         };
         app.refresh_from_store();
         // Album choice is session state, initialised from the loaded
@@ -282,6 +414,12 @@ impl Component for OuthApp {
         } else if !app.prefs.album_name.trim().is_empty() {
             app.album_mode = AlbumMode::Named;
             app.album_name = app.prefs.album_name.clone();
+        }
+        // First-run routing (F-01): with no account there is nothing to
+        // upload with, so land on Accounts where the sign-in card is the
+        // hero. The Upload page's empty state covers later states.
+        if app.accounts.is_empty() {
+            app.section = Section::Accounts;
         }
         app
     }
@@ -295,6 +433,59 @@ impl Component for OuthApp {
                     Some("settings") => self.section = Section::Settings,
                     _ => {}
                 }
+            }
+
+            // ---- Feedback & confirmations (spec §2) ----
+            Message::DismissUploadNote => self.upload_note = None,
+            Message::DismissAccountNote => self.account_note = None,
+            Message::DismissSettingsNote => self.settings_note = None,
+            Message::RequestRemoveAccount(email) => {
+                self.confirm = Some(Confirm::RemoveAccount(email));
+            }
+            Message::RequestClearQueue => {
+                self.confirm = Some(Confirm::ClearQueue);
+            }
+            Message::ConfirmResolved(agreed) => {
+                // Take first so a re-render never shows a stale dialog.
+                if let Some(confirm) = self.confirm.take() {
+                    if agreed {
+                        match confirm {
+                            Confirm::RemoveAccount(email) => {
+                                self.remove_account_now(&email);
+                            }
+                            Confirm::ClearQueue => self.paths.clear(),
+                            Confirm::DeleteOriginals => {
+                                self.prefs.delete_from_host = true;
+                                self.persist_preferences();
+                            }
+                        }
+                    }
+                }
+            }
+            Message::FilesDropped(paths) => {
+                // Dropped paths merge exactly like picker results.
+                for path in paths {
+                    if !self.paths.contains(&path) {
+                        self.paths.push(path);
+                    }
+                }
+            }
+            Message::RetryFailed => {
+                // TODO(upload-redesign §4.6): re-queue only the failed
+                // rows' `ResultRow.path`s and start a run. Stub for the
+                // foundation round — the completion panel's button is
+                // wired to this message.
+            }
+            Message::RemoveCompletedFromQueue => {
+                // TODO(upload-redesign §4.6): prune queue paths whose
+                // results are Uploaded/Skipped. Stub for the foundation
+                // round.
+            }
+            Message::OpenGooglePhotos => {
+                // Same dependency-free browser launch as OpenSignInPage.
+                let _ = std::process::Command::new("cmd")
+                    .args(["/C", "start", "", "https://photos.google.com/"])
+                    .spawn();
             }
 
             // ---- Upload section ----
@@ -318,7 +509,8 @@ impl Component for OuthApp {
                         Err(error) => Message::PickerFailed(error.to_string()),
                     });
                 if !accepted {
-                    self.upload_note = Some("The file picker could not be opened.".to_string());
+                    self.upload_note =
+                        Some(Note::error("The file picker could not be opened."));
                 }
             }
             Message::AddFolders => {
@@ -329,7 +521,8 @@ impl Component for OuthApp {
                         Err(error) => Message::PickerFailed(error.to_string()),
                     });
                 if !accepted {
-                    self.upload_note = Some("The folder picker could not be opened.".to_string());
+                    self.upload_note =
+                        Some(Note::error("The folder picker could not be opened."));
                 }
             }
             Message::PathsPicked(paths) => {
@@ -340,14 +533,20 @@ impl Component for OuthApp {
                 }
             }
             Message::PickerFailed(error) => {
-                self.upload_note = Some(format!("Picker failed: {error}"));
+                self.upload_note = Some(Note::error(format!("Picker failed: {error}")));
             }
             Message::RemovePath(index) => {
                 if index < self.paths.len() {
                     self.paths.remove(index);
                 }
             }
-            Message::ClearPaths => self.paths.clear(),
+            Message::ClearPaths => {
+                // Clearing the queue is destructive enough to confirm
+                // (spec §2); the Upload page's Clear button will send
+                // RequestClearQueue once it is redesigned — until then
+                // the legacy message routes to the same dialog.
+                self.confirm = Some(Confirm::ClearQueue);
+            }
             Message::AlbumModeChanged(index) => {
                 self.album_mode = AlbumMode::from_index(index);
             }
@@ -358,7 +557,7 @@ impl Component for OuthApp {
                     token.cancel();
                 }
                 self.cancel_requested = true;
-                self.upload_note = Some("Cancelling…".to_string());
+                self.upload_note = Some(Note::info("Cancelling…"));
             }
 
             // ---- Upload run (reporter bridge) ----
@@ -414,6 +613,7 @@ impl Component for OuthApp {
                 };
                 self.results.push(ResultRow {
                     file: upload::file_label(&result.file_path),
+                    path: result.file_path.clone(),
                     outcome: outcome.to_string(),
                     message: result.message,
                 });
@@ -436,13 +636,20 @@ impl Component for OuthApp {
             Message::UploadAlbumError(name, message) => {
                 self.album_status = Some(format!("Album '{name}' failed: {message}"));
             }
-            Message::UploadRunEnded(note) => {
+            Message::UploadRunEnded(ended) => {
                 self.running = false;
                 self.cancel_token = None;
-                self.upload_note = Some(if self.cancel_requested {
-                    "Upload cancelled.".to_string()
+                // Worker rows describe a live run only; the completion
+                // panel (spec §4.6) renders from `run_summary` instead.
+                self.workers.clear();
+                self.run_summary = Some(ended);
+                self.upload_note = Some(if ended.cancelled {
+                    Note::info("Upload cancelled.")
                 } else {
-                    note
+                    Note::success(format!(
+                        "Upload finished: {} uploaded · {} skipped · {} failed.",
+                        ended.uploaded, ended.skipped, ended.failed
+                    ))
                 });
                 self.cancel_requested = false;
             }
@@ -456,11 +663,10 @@ impl Component for OuthApp {
                 let _ = std::process::Command::new("cmd")
                     .args(["/C", "start", "", accounts::EMBEDDED_SETUP_URL])
                     .spawn();
-                self.account_note = Some(
+                self.account_note = Some(Note::info(
                     "Sign-in page opened in your browser. Copy the oauth_token cookie value \
-                     from DevTools and paste it here."
-                        .to_string(),
-                );
+                     from DevTools and paste it here.",
+                ));
             }
             Message::ConnectAccount => accounts::connect_account(self, context),
             Message::AccountConnected(Ok((email, credential, needs_token_binding))) => {
@@ -474,7 +680,7 @@ impl Component for OuthApp {
             }
             Message::AccountConnected(Err(error)) => {
                 self.auth_busy = false;
-                self.account_note = Some(format!("Sign-in failed: {error}"));
+                self.account_note = Some(Note::error(format!("Sign-in failed: {error}")));
             }
             Message::ImportRawCredential => {
                 let raw = self.raw_credential.trim().to_string();
@@ -489,8 +695,9 @@ impl Component for OuthApp {
                         self.add_account(account);
                     }
                     Err(error) => {
-                        self.account_note =
-                            Some(format!("That does not look like a credential: {error}"));
+                        self.account_note = Some(Note::error(format!(
+                            "That does not look like a credential: {error}"
+                        )));
                     }
                 }
             }
@@ -498,35 +705,38 @@ impl Component for OuthApp {
                 Some(service) => match store::set_active(service, &email) {
                     Ok(()) => {
                         self.refresh_from_store();
-                        self.account_note = Some(format!("{email} is now the active account."));
+                        self.account_note =
+                            Some(Note::success(format!("{email} is now the active account.")));
                     }
                     Err(error) => {
-                        self.account_note = Some(format!("Could not switch account: {error}"));
+                        self.account_note =
+                            Some(Note::error(format!("Could not switch account: {error}")));
                     }
                 },
                 None => {
-                    self.account_note =
-                        Some("Config could not be loaded; accounts are unavailable.".to_string());
+                    self.account_note = Some(Note::error(
+                        "Config could not be loaded; accounts are unavailable.",
+                    ));
                 }
             },
-            Message::RemoveAccount(email) => match &mut self.store {
-                Some(service) => match store::remove_account(service, &email) {
-                    Ok(()) => {
-                        self.refresh_from_store();
-                        self.account_note = Some(format!("Removed account {email}."));
-                    }
-                    Err(error) => {
-                        self.account_note = Some(format!("Could not remove account: {error}"));
-                    }
-                },
-                None => {
-                    self.account_note =
-                        Some("Config could not be loaded; accounts are unavailable.".to_string());
-                }
-            },
+            Message::RemoveAccount(email) => {
+                // Removal is destructive and hard to reverse (F-27), so
+                // the legacy message now routes through the confirmation
+                // dialog exactly like RequestRemoveAccount (spec §2);
+                // `remove_account_now` runs on ConfirmResolved(true).
+                self.confirm = Some(Confirm::RemoveAccount(email));
+            }
 
             // ---- Settings section ----
             Message::PrefBoolChanged(field, value) => {
+                // Enabling delete-originals is one of the three
+                // irreversible decisions reserved for a dialog (R-9):
+                // route through the confirmation instead of applying.
+                // Turning it OFF applies immediately.
+                if field == PrefBool::DeleteFromHost && value && !self.prefs.delete_from_host {
+                    self.confirm = Some(Confirm::DeleteOriginals);
+                    return;
+                }
                 field.apply(&mut self.prefs, value);
                 self.persist_preferences();
             }
@@ -550,39 +760,168 @@ impl Component for OuthApp {
     }
 
     fn view(&self, _input: &(), context: &mut ViewContext<Self>) -> View {
+        context.window_title("Outh");
+        context.window_visuals(
+            WindowVisuals::new()
+                .backdrop(WindowBackdrop::Mica)
+                .client_size(1100.0, 720.0)
+                .constraints(WindowConstraints {
+                    min_width: Some(640.0),
+                    min_height: Some(480.0),
+                    max_width: None,
+                    max_height: None,
+                }),
+        );
+
         let section_view = match self.section {
             Section::Upload => upload::view(self, context),
             Section::Accounts => accounts::view(self, context),
             Section::Settings => settings::view(self, context),
         };
-        let item = |tag: &'static str, label: &'static str, selected: bool| {
+        // The config-load failure is the app's worst state (F-03): a
+        // persistent, non-closable Error bar at the top of EVERY page
+        // until the config loads — rendered once here, not per page.
+        let content: View = match &self.store_error {
+            Some(error) => Grid::new()
+                .rows([GridLength::Auto, GridLength::STAR])
+                .children(vec![
+                    Border::new()
+                        .padding(Thickness::new(
+                            theme::PAGE_PADDING_X,
+                            theme::SPACE_L,
+                            theme::PAGE_PADDING_X,
+                            0.0,
+                        ))
+                        .content(theme::info_bar(
+                            NoteSeverity::Error,
+                            Some("Config couldn't be loaded"),
+                            error,
+                            None,
+                        ))
+                        .into(),
+                    // An erased View can't carry grid placement itself;
+                    // wrap it (the same trick window_frame uses).
+                    Border::new().grid_row(1).content(section_view).into(),
+                ])
+                .into(),
+            None => section_view,
+        };
+
+        let item = |tag: &'static str,
+                    label: &'static str,
+                    symbol: Symbol,
+                    selected: bool| {
             KeyedView::new(
                 tag,
                 NavigationViewItem::new()
                     .tag(tag)
                     .is_selected(selected)
+                    .icon(Icon::symbol(symbol))
                     .content(label),
             )
         };
         let navigation = NavigationView::new()
-            .pane_display_mode(NavigationViewPaneDisplayMode::Left)
-            .pane_title("Outh")
+            .pane_display_mode(NavigationViewPaneDisplayMode::Auto)
             .is_settings_visible(false)
             .on_selected_tag_changed(context.callback(|tag: Option<Rc<str>>| {
                 Message::NavigateTag(tag.map(|tag| tag.to_string()))
             }))
             .keyed_menu_items([
-                item("upload", "Upload", self.section == Section::Upload),
-                item("accounts", "Accounts", self.section == Section::Accounts),
+                item(
+                    "upload",
+                    "Upload",
+                    Symbol::Upload,
+                    self.section == Section::Upload,
+                ),
+                item(
+                    "accounts",
+                    "Accounts",
+                    Symbol::People,
+                    self.section == Section::Accounts,
+                ),
             ])
+            // The built-in settings item carries a null tag in WinUI, so
+            // selection would arrive as `None` and never route; a footer
+            // item with the standard gear icon stands in for it (the same
+            // pattern the reactor gallery uses).
             .keyed_footer_menu_items([item(
                 "settings",
                 "Settings",
+                Symbol::Setting,
                 self.section == Section::Settings,
             )])
-            .content(section_view);
-        context.window_frame("Outh", navigation)
+            .content(content)
+            .grid_row(1);
+
+        // Hand-composed frame (window_frame hard-codes its TitleBar and
+        // shows a dead back chevron — I-28): app icon + title, no back
+        // button, and NavigationView no longer repeats "Outh" as a pane
+        // header (V-09).
+        let title_bar = TitleBar::new()
+            .title("Outh")
+            .icon(Icon::symbol(Symbol::Pictures))
+            .is_back_button_visible(false)
+            .is_pane_toggle_button_visible(false);
+
+        let frame: View = Grid::new()
+            .rows([GridLength::Auto, GridLength::STAR])
+            .children((title_bar, navigation))
+            .into();
+
+        // The one global confirmation dialog (spec §2), always attached
+        // per the gallery pattern; `is_open` follows `self.confirm`.
+        frame.content_dialog(confirm_dialog(self.confirm.as_ref(), context))
     }
+}
+
+/// Builds the root ContentDialog for the pending `Confirm` (closed and
+/// empty when there is none). Primary = the destructive action;
+/// dismissal (close button / Esc) resolves as `ConfirmResolved(false)`.
+fn confirm_dialog(confirm: Option<&Confirm>, context: &mut ViewContext<OuthApp>) -> ContentDialog {
+    let (title, body, primary): (&str, String, &str) = match confirm {
+        Some(Confirm::RemoveAccount(email)) => (
+            "Remove account?",
+            format!(
+                "Outh will forget {email}'s sign-in. To re-add it you would need to sign \
+                 in again in your browser and paste a fresh oauth_token cookie. If this \
+                 is the active account, uploads will need another account before they \
+                 can run."
+            ),
+            "Remove account",
+        ),
+        Some(Confirm::ClearQueue) => (
+            "Clear the queue?",
+            "All queued files and folders will be removed from the list. \
+             The files themselves stay on disk."
+                .to_string(),
+            "Clear queue",
+        ),
+        Some(Confirm::DeleteOriginals) => (
+            "Delete originals after upload?",
+            "With this on, Outh permanently deletes each local file once Google \
+             confirms the upload — including files that turn out to already be in \
+             your library, which are also deleted locally even though nothing is \
+             uploaded for them. Deletion is permanent."
+                .to_string(),
+            "Delete originals",
+        ),
+        None => ("", String::new(), ""),
+    };
+    ContentDialog::new()
+        .title(title)
+        .content(
+            TextBlock::new()
+                .text(body)
+                .text_wrapping(TextWrapping::Wrap),
+        )
+        .primary_button_text(primary)
+        .close_button_text("Cancel")
+        .is_open(confirm.is_some())
+        .on_closed(
+            context.callback(|result: ContentDialogResult| {
+                Message::ConfirmResolved(matches!(result, ContentDialogResult::Primary))
+            }),
+        )
 }
 
 fn main() {
