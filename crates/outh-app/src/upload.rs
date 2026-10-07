@@ -110,19 +110,29 @@ pub fn start_upload(app: &mut OuthApp, context: &ComponentContext<OuthApp>) {
     if app.running {
         return;
     }
+    // Only the ACTIVE account is ever used — never a silent fallback to
+    // the first account (FINAL_REVIEW R-01): uploading to the wrong
+    // account is worse than not uploading.
     let account = app
         .accounts
         .iter()
         .find(|account| app.active_email.as_deref() == Some(account.email.as_str()))
-        .or_else(|| app.accounts.first())
         .cloned();
     let Some(account) = account else {
-        app.upload_note = Some(Note::warning(
-            "Add an account first (Accounts section), then start the upload.",
-        ));
+        app.account_note = Some(Note::warning(if app.accounts.is_empty() {
+            "Add an account first, then start the upload."
+        } else {
+            "No account is active — choose one here, then start the upload."
+        }));
         app.section = Section::Accounts;
         return;
     };
+    if account.needs_token_binding {
+        app.upload_note = Some(Note::warning(
+            "The active account needs token binding, which this version doesn't support yet — see the note on its card in Accounts.",
+        ));
+        return;
+    }
     if app.paths.is_empty() {
         app.upload_note = Some(Note::warning("Add at least one file or folder to upload."));
         return;
@@ -223,8 +233,6 @@ pub fn view(app: &OuthApp, context: &mut ViewContext<OuthApp>) -> View {
                 .content(
                     StackPanel::new()
                         .spacing(theme::SPACE_XL)
-                        .max_width(theme::CONTENT_MAX_WIDTH)
-                        .horizontal_alignment(HorizontalAlignment::Left)
                         .children(children),
                 ),
         )
@@ -237,16 +245,21 @@ pub fn view(app: &OuthApp, context: &mut ViewContext<OuthApp>) -> View {
 fn queue_section(app: &OuthApp, context: &mut ViewContext<OuthApp>) -> View {
     let mut children: Vec<View> = Vec::new();
     children.push(theme::strong(format!("Queue ({})", app.paths.len())));
+    // The add row comes FIRST in construction order (= tab order, R-15)
+    // and stays visible above a long queue; the rows follow it.
+    children.push(add_row(app, context));
     if app.paths.is_empty() {
         children.push(theme::caption(
-            "Nothing queued yet — add files or folders below, or drag them here.",
+            "Nothing queued yet — add files or folders above, or drag them here.",
         ));
+    } else {
+        // The standalone drag hint only when the empty-state caption
+        // isn't already saying it (R-13).
+        children.push(theme::caption("or drag files and folders here"));
+        for (index, path) in app.paths.iter().enumerate() {
+            children.push(queue_row(app, context, index, path));
+        }
     }
-    for (index, path) in app.paths.iter().enumerate() {
-        children.push(queue_row(app, context, index, path));
-    }
-    children.push(add_row(app, context));
-    children.push(theme::caption("or drag files and folders here"));
 
     let panel = StackPanel::new()
         .spacing(theme::SPACE_M)
@@ -431,6 +444,12 @@ fn album_area(app: &OuthApp, context: &mut ViewContext<OuthApp>) -> View {
                 }))
                 .into(),
         );
+        // Album semantics, stated (R-11): a name creates; a key reuses.
+        children.push(theme::caption(if app.album_name.trim().starts_with("AF1Qip") {
+            "Existing album (by key)."
+        } else {
+            "Typing a name creates a new album. To add to an existing album, paste its key (from the album's web URL)."
+        }));
     }
     StackPanel::new()
         .spacing(theme::SPACE_S)
@@ -438,13 +457,12 @@ fn album_area(app: &OuthApp, context: &mut ViewContext<OuthApp>) -> View {
         .into()
 }
 
-/// The account a run would use — the same selection `start_upload`
-/// makes (active account, else the first).
+/// The account a run would use — the ACTIVE account only, exactly the
+/// selection `start_upload` makes (no first-account fallback, R-01).
 fn active_email(app: &OuthApp) -> Option<String> {
     app.accounts
         .iter()
         .find(|account| app.active_email.as_deref() == Some(account.email.as_str()))
-        .or_else(|| app.accounts.first())
         .map(|account| account.email.clone())
 }
 
@@ -475,13 +493,25 @@ fn actions_row(app: &OuthApp, context: &mut ViewContext<OuthApp>) -> View {
             .content("Start upload")
             .into(),
     );
-    if let Some(email) = active_email(app) {
-        row.push(
-            Border::new()
-                .vertical_alignment(VerticalAlignment::Center)
-                .content(theme::caption(format!("Uploading as {email}")))
-                .into(),
-        );
+    match active_email(app) {
+        Some(email) => {
+            row.push(
+                Border::new()
+                    .vertical_alignment(VerticalAlignment::Center)
+                    .content(theme::caption(format!("Will upload as {email}")))
+                    .into(),
+            );
+        }
+        None => {
+            row.push(
+                Border::new()
+                    .vertical_alignment(VerticalAlignment::Center)
+                    .content(theme::caption(
+                        "No account selected — choose one in Accounts",
+                    ))
+                    .into(),
+            );
+        }
     }
     StackPanel::new()
         .orientation(Orientation::Horizontal)
@@ -493,11 +523,11 @@ fn actions_row(app: &OuthApp, context: &mut ViewContext<OuthApp>) -> View {
 /// The live run dashboard (spec §4.5). Truthful progress only: the
 /// bar is the finished-files fraction (results are the authoritative
 /// stream) and stays indeterminate while preflight has not produced a
-/// total yet; bytes are the summed per-worker counters, shown as a
-/// text twin, never blended into the bar.
+/// total yet. Byte counts appear ONLY on per-worker rows (per-file and
+/// truthful); an aggregate byte twin would regress whenever a worker
+/// moves to its next file (FINAL_REVIEW R-07), so there is none.
 fn progress_area(app: &OuthApp) -> View {
     let finished = app.results.len();
-    let uploaded_bytes: u64 = app.workers.iter().map(|row| row.bytes_uploaded).sum();
     let uploaded = app
         .results
         .iter()
@@ -529,18 +559,10 @@ fn progress_area(app: &OuthApp) -> View {
     children.push(bar.into());
 
     let counts = if app.total_files > 0 {
-        let mut line = format!(
+        format!(
             "{finished} of {} files · {uploaded} uploaded · {skipped} skipped · {failed} failed",
             app.total_files
-        );
-        if app.total_bytes > 0 {
-            line.push_str(&format!(
-                " · {} of {}",
-                theme::fmt_bytes(uploaded_bytes),
-                theme::fmt_bytes(app.total_bytes)
-            ));
-        }
-        line
+        )
     } else {
         "Scanning files…".to_string()
     };
@@ -597,6 +619,20 @@ fn completion_panel(
         "{} uploaded · {} skipped · {} failed",
         summary.uploaded, summary.skipped, summary.failed
     )));
+    // Files the run never attempted (e.g. everything after a cancel) —
+    // the summary knows the denominator even when results don't (R-08).
+    let attempted = summary.uploaded + summary.skipped + summary.failed;
+    if summary.total_items > attempted {
+        children.push(theme::secondary(format!(
+            "{} file{} not attempted",
+            summary.total_items - attempted,
+            if summary.total_items - attempted == 1 {
+                ""
+            } else {
+                "s"
+            }
+        )));
+    }
     if let Some(status) = &app.album_status {
         children.push(theme::secondary(status.clone()));
     }

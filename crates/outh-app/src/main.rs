@@ -321,26 +321,45 @@ impl OuthApp {
         }
     }
 
-    fn add_account(&mut self, account: Account) {
+    /// Adds an account and makes it active. Returns true only when BOTH
+    /// steps persisted — callers must not announce success on false
+    /// (FINAL_REVIEW R-02: a swallowed save/activate failure previously
+    /// reported "Connected and made active" for an account that vanished
+    /// on the next launch).
+    fn add_account(&mut self, account: Account) -> bool {
         let email = account.email.clone();
         match &mut self.store {
             Some(service) => match store::add_account(service, account) {
                 Ok(()) => {
                     // A newly added account becomes the active one, as in
                     // gotohp (the GUI selects the account it just added).
-                    let _ = store::set_active(service, &email);
-                    self.refresh_from_store();
-                    self.account_note = Some(Note::success(format!("Added account {email}.")));
+                    match store::set_active(service, &email) {
+                        Ok(()) => {
+                            self.refresh_from_store();
+                            self.account_note =
+                                Some(Note::success(format!("Added account {email}.")));
+                            true
+                        }
+                        Err(error) => {
+                            self.refresh_from_store();
+                            self.account_note = Some(Note::error(format!(
+                                "Account saved, but making it active failed: {error}"
+                            )));
+                            false
+                        }
+                    }
                 }
                 Err(error) => {
                     self.account_note =
                         Some(Note::error(format!("Could not save the account: {error}")));
+                    false
                 }
             },
             None => {
                 self.account_note = Some(Note::error(
                     "Config could not be loaded, so the account was not saved.",
                 ));
+                false
             }
         }
     }
@@ -471,21 +490,40 @@ impl Component for OuthApp {
                 }
             }
             Message::RetryFailed => {
-                // Re-queue exactly the failed files (their full paths
-                // from the results) and start a fresh run through the
-                // same path as StartUpload (spec §4.6).
+                // Merge the failed files back into the queue and start a
+                // fresh run through the same path as StartUpload (spec
+                // §4.6). Validation happens BEFORE any mutation
+                // (FINAL_REVIEW R-03): start_upload re-checks everything
+                // and owns clearing results/run_summary on its success
+                // path, so a rejected retry leaves the previous run's
+                // history and the rest of the queue intact.
                 let failed: Vec<PathBuf> = self
                     .results
                     .iter()
                     .filter(|row| row.outcome == "Failed")
                     .map(|row| row.path.clone())
                     .collect();
-                if !failed.is_empty() {
-                    self.paths = failed;
-                    self.results.clear();
-                    self.run_summary = None;
-                    upload::start_upload(self, context);
+                if failed.is_empty() || self.running {
+                    return;
                 }
+                // Mirror start_upload's guards so a doomed retry changes
+                // nothing (its own arms set the explanatory notes).
+                let has_active = self
+                    .active_email
+                    .as_deref()
+                    .is_some_and(|email| self.accounts.iter().any(|a| a.email == email));
+                let album_blocked = self.album_mode == AlbumMode::Named
+                    && self.album_name.trim().is_empty();
+                if !has_active || album_blocked {
+                    upload::start_upload(self, context);
+                    return;
+                }
+                for path in failed {
+                    if !self.paths.contains(&path) {
+                        self.paths.push(path);
+                    }
+                }
+                upload::start_upload(self, context);
             }
             Message::RemoveCompletedFromQueue => {
                 // Prune queue entries whose files the last run uploaded
@@ -503,6 +541,15 @@ impl Component for OuthApp {
                     .collect();
                 self.paths.retain(|path| !completed.contains(path));
                 self.run_summary = None;
+                // Folder entries survive pruning (their files are done
+                // but the folder itself can't be matched to results) —
+                // say so instead of leaving a mysteriously full queue
+                // (FINAL_REVIEW R-23).
+                if self.paths.iter().any(|path| path.is_dir()) {
+                    self.upload_note = Some(Note::info(
+                        "Folder entries stay in the queue — their completed files are done and will be skipped next run.",
+                    ));
+                }
             }
             Message::OpenGooglePhotos => {
                 // Same dependency-free browser launch as OpenSignInPage.
@@ -514,13 +561,37 @@ impl Component for OuthApp {
             // ---- Upload section ----
             Message::PathDraftChanged(value) => self.path_draft = value,
             Message::AddPathDraft => {
-                let draft = self.path_draft.trim().to_string();
-                if !draft.is_empty() {
-                    let path = PathBuf::from(draft);
-                    if !self.paths.contains(&path) {
-                        self.paths.push(path);
+                // Validate at add time (FINAL_REVIEW R-12): a pasted
+                // path that doesn't exist is a typo to correct now, not
+                // a failed upload later; multi-line pastes split into
+                // separate entries.
+                let draft = self.path_draft.clone();
+                let mut notes: Vec<Note> = Vec::new();
+                let mut added = 0usize;
+                for line in draft.lines() {
+                    let line = line.trim().trim_matches('"');
+                    if line.is_empty() {
+                        continue;
                     }
+                    let path = PathBuf::from(line);
+                    if !path.exists() {
+                        notes.push(Note::warning(format!(
+                            "That path doesn't exist: {line}"
+                        )));
+                    } else if self.paths.contains(&path) {
+                        notes.push(Note::info(format!("Already in the queue: {line}")));
+                    } else {
+                        self.paths.push(path);
+                        added += 1;
+                    }
+                }
+                if added > 0 {
                     self.path_draft.clear();
+                }
+                if let Some(note) = notes.into_iter().next() {
+                    self.upload_note = Some(note);
+                } else if added > 0 {
+                    self.upload_note = None;
                 }
             }
             Message::AddFiles => {
@@ -572,8 +643,22 @@ impl Component for OuthApp {
             }
             Message::AlbumModeChanged(index) => {
                 self.album_mode = AlbumMode::from_index(index);
+                // Persist the album choice deliberately (R-25): create()
+                // restores it from Preferences, so the UI must write it —
+                // previously nothing did, and the restore read stale data.
+                self.prefs.album_auto_mode = self.album_mode == AlbumMode::Auto;
+                if self.album_mode == AlbumMode::Named {
+                    self.prefs.album_name = self.album_name.clone();
+                }
+                self.persist_preferences();
             }
-            Message::AlbumNameChanged(value) => self.album_name = value,
+            Message::AlbumNameChanged(value) => {
+                self.album_name = value;
+                if self.album_mode == AlbumMode::Named {
+                    self.prefs.album_name = self.album_name.clone();
+                    self.persist_preferences();
+                }
+            }
             Message::StartUpload => upload::start_upload(self, context),
             Message::CancelUpload => {
                 if let Some(token) = &self.cancel_token {
@@ -666,14 +751,10 @@ impl Component for OuthApp {
                 // panel (spec §4.6) renders from `run_summary` instead.
                 self.workers.clear();
                 self.run_summary = Some(ended);
-                self.upload_note = Some(if ended.cancelled {
-                    Note::info("Upload cancelled.")
-                } else {
-                    Note::success(format!(
-                        "Upload finished: {} uploaded · {} skipped · {} failed.",
-                        ended.uploaded, ended.skipped, ended.failed
-                    ))
-                });
+                // No note: the completion panel IS the terminal surface
+                // (title, counts, not-attempted line, actions). A second
+                // summary in a note duplicated it — and wore Success
+                // green even for an all-failed run (FINAL_REVIEW R-05).
                 self.cancel_requested = false;
             }
 
@@ -696,16 +777,19 @@ impl Component for OuthApp {
                 self.auth_busy = false;
                 self.oauth_token.clear();
                 let connected_email = email.clone();
-                self.add_account(Account {
+                let saved = self.add_account(Account {
                     email,
                     credential,
                     needs_token_binding,
                 });
-                // Spec §5.2 success copy (add_account's generic note is
-                // overridden for the connect flow).
-                self.account_note = Some(Note::success(format!(
-                    "Connected and made active: {connected_email}"
-                )));
+                // Spec §5.2 success copy — ONLY when the account truly
+                // saved and activated (R-02); on failure add_account has
+                // already set the honest error note.
+                if saved {
+                    self.account_note = Some(Note::success(format!(
+                        "Connected and made active: {connected_email}"
+                    )));
+                }
             }
             Message::AccountConnected(Err(error)) => {
                 self.auth_busy = false;

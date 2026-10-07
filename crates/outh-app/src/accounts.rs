@@ -131,6 +131,7 @@ fn account_card(app: &OuthApp, account: &Account, context: &mut ViewContext<Outh
         actions.push(
             Button::new()
                 .style(ButtonStyle::Subtle)
+                .automation_name(format!("Set {email_for_set} active"))
                 .is_enabled(!app.running)
                 .on_click(move || {
                     _ = set_sender.send(Message::SetActiveAccount(email_for_set.clone()));
@@ -142,6 +143,7 @@ fn account_card(app: &OuthApp, account: &Account, context: &mut ViewContext<Outh
     actions.push(
         Button::new()
             .style(ButtonStyle::Subtle)
+            .automation_name(format!("Remove account {email}"))
             .is_enabled(!app.running)
             .on_click(move || {
                 _ = sender.send(Message::RequestRemoveAccount(email.clone()));
@@ -250,8 +252,8 @@ fn sign_in_card(app: &OuthApp, context: &mut ViewContext<OuthApp>) -> View {
         theme::section_title("Add an account"),
         step(
             "1 — Sign in on Google's page",
-            "Open the Embedded Setup page and sign in with the Google \
-             account you want to connect.",
+            "Open the Embedded Setup page and sign in. The account you \
+             sign in as in the browser is the account that gets connected.",
         ),
         step(
             "2 — Copy the oauth_token cookie",
@@ -263,10 +265,6 @@ fn sign_in_card(app: &OuthApp, context: &mut ViewContext<OuthApp>) -> View {
             "3 — Paste it here and connect",
             "Paste the value below and choose Connect. Outh trades it for a \
              long-lived sign-in, so you only do this once per account.",
-        ),
-        theme::body(
-            "The account you sign in as in the browser is the account that \
-             gets connected.",
         ),
         theme::caption("This app never asks for your Google password."),
         token_box.into(),
@@ -352,8 +350,6 @@ pub fn view(app: &OuthApp, context: &mut ViewContext<OuthApp>) -> View {
                 .content(
                     StackPanel::new()
                         .spacing(theme::SPACE_XL)
-                        .max_width(theme::CONTENT_MAX_WIDTH)
-                        .horizontal_alignment(HorizontalAlignment::Left)
                         .children(children),
                 ),
         )

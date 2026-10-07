@@ -19,10 +19,11 @@ pub fn view(app: &OuthApp, context: &mut ViewContext<OuthApp>) -> View {
     let prefs = &app.prefs;
     // One bare switch per boolean preference: no header, no On/Off text
     // (the settings_row carries the label and explanation).
-    let toggle = |is_on: bool, field: PrefBool| -> View {
+    let toggle = |name: &str, is_on: bool, field: PrefBool| -> View {
         ToggleSwitch::new()
             .on_content("")
             .off_content("")
+            .automation_name(name)
             .is_on(is_on)
             .on_toggled(context.callback(move |value: bool| {
                 Message::PrefBoolChanged(field, value)
@@ -48,13 +49,13 @@ pub fn view(app: &OuthApp, context: &mut ViewContext<OuthApp>) -> View {
             "Uploads count toward your Google storage. Off = uploads claim a \
              Pixel XL identity and may not count toward storage — unofficial, \
              and it can stop working at any time.",
-            toggle(prefs.use_quota, PrefBool::UseQuota),
+            toggle("Use quota", prefs.use_quota, PrefBool::UseQuota),
         ),
         theme::settings_row(
             "Storage saver",
             "Uploads claim a Pixel 2 identity; photos are compressed to high \
              quality and may count differently — unofficial.",
-            toggle(prefs.saver, PrefBool::Saver),
+            toggle("Storage saver", prefs.saver, PrefBool::Saver),
         ),
     ]));
 
@@ -64,13 +65,13 @@ pub fn view(app: &OuthApp, context: &mut ViewContext<OuthApp>) -> View {
         theme::settings_row(
             "Include subfolders",
             "When a folder is added, files inside its subfolders are queued too.",
-            toggle(prefs.recursive, PrefBool::Recursive),
+            toggle("Include subfolders", prefs.recursive, PrefBool::Recursive),
         ),
         theme::settings_row(
             "Force upload",
             "Skip the already-in-library check and upload every file again, \
              even ones Google Photos already has.",
-            toggle(prefs.force_upload, PrefBool::ForceUpload),
+            toggle("Force upload", prefs.force_upload, PrefBool::ForceUpload),
         ),
         theme::settings_row(
             "Delete local file after upload",
@@ -78,7 +79,7 @@ pub fn view(app: &OuthApp, context: &mut ViewContext<OuthApp>) -> View {
              including files that turn out to already be in your library, \
              which are deleted locally without being uploaded again. \
              Deletion is permanent.",
-            toggle(prefs.delete_from_host, PrefBool::DeleteFromHost),
+            toggle("Delete local file after upload", prefs.delete_from_host, PrefBool::DeleteFromHost),
         ),
     ]));
 
@@ -89,22 +90,40 @@ pub fn view(app: &OuthApp, context: &mut ViewContext<OuthApp>) -> View {
             "Pair Apple Live Photos",
             "Match a still photo with its video by Apple's content \
              identifier and upload them as one Live Photo.",
-            toggle(prefs.pair_live_photos, PrefBool::PairLivePhotos),
+            toggle("Pair Apple Live Photos", prefs.pair_live_photos, PrefBool::PairLivePhotos),
         ),
         theme::settings_row(
             "Skip incomplete Live Photos",
             "Skip a Live Photo when one of its two files — the still or the \
-             video — is missing.",
-            toggle(
-                prefs.skip_incomplete_live_photos,
-                PrefBool::SkipIncompleteLivePhotos,
-            ),
+             video — is missing. Only applies while pairing is on.",
+            // Dependent on pairing (R-24): disabled while Pair is off.
+            ToggleSwitch::new()
+                .on_content("")
+                .off_content("")
+                .automation_name("Skip incomplete Live Photos")
+                .is_enabled(prefs.pair_live_photos)
+                .is_on(prefs.skip_incomplete_live_photos)
+                .on_toggled(context.callback(|value: bool| {
+                    Message::PrefBoolChanged(PrefBool::SkipIncompleteLivePhotos, value)
+                }))
+                .into(),
         ),
         theme::settings_row(
             "Update existing photos to Live Photos",
             "When the video half of a Live Photo arrives later, convert the \
-             photo already in your library into a Live Photo.",
-            toggle(prefs.update_existing_to_live, PrefBool::UpdateExistingToLive),
+             photo already in your library into a Live Photo. Only applies \
+             while pairing is on.",
+            // Dependent on pairing (R-24): disabled while Pair is off.
+            ToggleSwitch::new()
+                .on_content("")
+                .off_content("")
+                .automation_name("Update existing photos to Live Photos")
+                .is_enabled(prefs.pair_live_photos)
+                .is_on(prefs.update_existing_to_live)
+                .on_toggled(context.callback(|value: bool| {
+                    Message::PrefBoolChanged(PrefBool::UpdateExistingToLive, value)
+                }))
+                .into(),
         ),
     ]));
 
@@ -115,7 +134,7 @@ pub fn view(app: &OuthApp, context: &mut ViewContext<OuthApp>) -> View {
             "Set date from file name",
             "When a file name contains a date and time, use it as the \
              photo's capture date; otherwise the file's own timestamp is used.",
-            toggle(prefs.set_date_from_filename, PrefBool::SetDateFromFilename),
+            toggle("Set date from file name", prefs.set_date_from_filename, PrefBool::SetDateFromFilename),
         ),
         theme::settings_row(
             "Include unsupported file types",
@@ -126,6 +145,7 @@ pub fn view(app: &OuthApp, context: &mut ViewContext<OuthApp>) -> View {
             ToggleSwitch::new()
                 .on_content("")
                 .off_content("")
+                .automation_name("Include unsupported file types")
                 .is_on(!prefs.disable_unsupported_filter)
                 .on_toggled(context.callback(|value: bool| {
                     Message::PrefBoolChanged(PrefBool::DisableUnsupportedFilter, !value)
@@ -141,6 +161,7 @@ pub fn view(app: &OuthApp, context: &mut ViewContext<OuthApp>) -> View {
             "Upload threads",
             "Parallel uploads (1–16).",
             NumberBox::new()
+                .automation_name("Upload threads")
                 .minimum(1.0)
                 .maximum(16.0)
                 .value(Some(prefs.upload_threads as f64))
@@ -151,6 +172,7 @@ pub fn view(app: &OuthApp, context: &mut ViewContext<OuthApp>) -> View {
             "Proxy",
             "http(s)://host:port — leave empty for direct.",
             TextBox::new(prefs.proxy.clone())
+                .automation_name("Proxy")
                 .placeholder_text("http://127.0.0.1:8080")
                 .on_text_changed(context.callback(|value: std::rc::Rc<str>| {
                     Message::PrefProxyChanged(value.to_string())
@@ -162,6 +184,7 @@ pub fn view(app: &OuthApp, context: &mut ViewContext<OuthApp>) -> View {
             "Folders with exactly this name are skipped (not a regular \
              expression).",
             TextBox::new(prefs.exclude_pattern.clone())
+                .automation_name("Exclude folders by name")
                 .placeholder_text("Exact folder name")
                 .on_text_changed(context.callback(|value: std::rc::Rc<str>| {
                     Message::PrefExcludePatternChanged(value.to_string())
@@ -182,8 +205,6 @@ pub fn view(app: &OuthApp, context: &mut ViewContext<OuthApp>) -> View {
                 .content(
                     StackPanel::new()
                         .spacing(theme::SPACE_XL)
-                        .max_width(theme::CONTENT_MAX_WIDTH)
-                        .horizontal_alignment(HorizontalAlignment::Left)
                         .children(children),
                 ),
         )

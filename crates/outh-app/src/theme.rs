@@ -40,6 +40,11 @@ pub const SPACE_XXL: f64 = 32.0;
 
 pub const PAGE_PADDING_X: f64 = 24.0;
 pub const PAGE_PADDING_TOP: f64 = 32.0;
+/// Documented content cap for very wide windows. Not currently applied:
+/// page scaffolds stretch to the content viewport instead (the R-10 fix —
+/// a Left-aligned max-width column measured narrower than the viewport).
+/// Kept as the scale's reference value if a capped layout returns.
+#[allow(dead_code)]
 pub const CONTENT_MAX_WIDTH: f64 = 980.0;
 
 // ---------------------------------------------------------------------------
@@ -52,6 +57,7 @@ pub fn page_title(text: impl AsRef<str>) -> View {
         .text(text)
         .font_size(TYPE_PAGE_TITLE)
         .font_weight(FontWeight::SEMI_BOLD)
+        .automation_heading_level(AutomationHeadingLevel::Level1)
         .into()
 }
 
@@ -61,6 +67,7 @@ pub fn section_title(text: impl AsRef<str>) -> View {
         .text(text)
         .font_size(TYPE_SECTION)
         .font_weight(FontWeight::SEMI_BOLD)
+        .automation_heading_level(AutomationHeadingLevel::Level2)
         .into()
 }
 
@@ -111,7 +118,7 @@ pub fn caption(text: impl AsRef<str>) -> View {
 // ---------------------------------------------------------------------------
 
 /// The one card recipe: CardBackground + CardStroke 1px + radius 8 +
-/// 16px padding, children stacked with 8px gaps.
+/// 16px padding, children stacked with 12px gaps (SPACE_M).
 pub fn card(children: Vec<View>) -> View {
     Border::new()
         .background(ThemeBrush::CardBackground)
