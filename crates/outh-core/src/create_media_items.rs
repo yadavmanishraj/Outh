@@ -19,8 +19,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use base64::Engine as _;
 
 use crate::protocol::{
-    CreateMediaItemsRequest, LivePhotoInfo, MediaItemBlueprint, ReconcileInfo, ScottyToken,
-    UploadDeviceInfo as ProtoUploadDeviceInfo, UploadTimestamp,
+    CreateMediaItemsRequest, DeviceInfo as ProtoUploadDeviceInfo, LivePhotoInfo,
+    MediaItemBlueprint, ReconcileInfo, ReconcileType, ScottyToken, UploadTimestamp,
 };
 use crate::{Error, Result};
 
@@ -294,7 +294,7 @@ pub fn build_live_photo_reconcile_media_items_request(
             filesystem_mod_time: Some(input.modified_at.to_proto()),
             storage_policy: input.storage_policy,
             reconcile_info: Some(ReconcileInfo {
-                reconcile_type: RECONCILE_TYPE_PHODEO,
+                reconcile_type: ReconcileType::Phodeo,
                 source_sha1: input.photo_sha1.clone(),
                 photo_upload_blueprint: None,
             }),
